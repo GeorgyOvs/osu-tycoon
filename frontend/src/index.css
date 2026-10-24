@@ -1,0 +1,15 @@
+@import "tailwindcss";
+
+@theme {
+  --color-osu-pink: #ff66aa;
+  --color-osu-pink-dark: #cc3377;
+  --color-bg: #1c1719;
+  --color-panel: #2a2226;
+  --color-panel-light: #382d32;
+  --color-muted: #a3949b;
+  --font-sans: "Torus", "Segoe UI", system-ui, sans-serif;
+}
+
+body {
+  @apply bg-bg text-white antialiased;
+}

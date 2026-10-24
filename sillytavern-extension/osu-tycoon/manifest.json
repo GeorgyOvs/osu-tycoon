@@ -1,0 +1,9 @@
+{
+  "display_name": "osu! Tycoon Bridge",
+  "loading_order": 100,
+  "js": "index.js",
+  "css": "style.css",
+  "author": "osu! Tycoon",
+  "version": "0.2.0",
+  "auto_update": false
+}

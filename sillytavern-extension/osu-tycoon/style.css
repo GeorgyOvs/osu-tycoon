@@ -1,0 +1,4 @@
+.osu-tycoon-settings .row { display: flex; gap: 8px; align-items: center; margin: 4px 0; }
+.osu-tycoon-settings .row label { flex: 1; }
+.osu-tycoon-settings input[type="text"], .osu-tycoon-settings select { flex: 2; }
+.osu-tycoon-settings .status { font-size: 0.85em; opacity: 0.8; margin-top: 6px; white-space: pre-line; }
