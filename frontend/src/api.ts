@@ -135,6 +135,28 @@ export interface PlayerProfile extends Player {
   recent_scores: Score[]
 }
 
+export interface RealPlay {
+  id: number
+  beatmap_id: number
+  artist: string
+  title: string
+  difficulty_name: string
+  mods: string
+  accuracy: number
+  max_combo: number
+  misses: number
+  stars: number
+  pp: number
+  played_at: string
+  baseline: boolean
+}
+
+export interface RealSync {
+  baseline: boolean
+  imported: number
+  plays: RealPlay[]
+}
+
 export interface ScoreSubmitResult {
   score: Score
   is_new_top_play: boolean
@@ -214,6 +236,9 @@ export const api = {
       method: 'POST',
       body: JSON.stringify(body),
     }),
+  syncRealPlays: (playerId: number) =>
+    request<RealSync>(`/api/players/${playerId}/real/sync`, { method: 'POST' }),
+  listRealPlays: (playerId: number) => request<RealPlay[]>(`/api/players/${playerId}/real?limit=20`),
   listDrills: (playerId: number) => request<Drill[]>(`/api/players/${playerId}/drills`),
   train: (playerId: number, body: { drill: string; hours_per_day: number; days: number }) =>
     request<ActionResult>(`/api/players/${playerId}/train`, { method: 'POST', body: JSON.stringify(body) }),

@@ -32,6 +32,7 @@ import { LifePanel } from './LifePanel'
 import { PlayPanel, SessionQueue } from './PlayPanel'
 import { QuickSession } from './QuickSession'
 import { usePersisted } from '../usePersisted'
+import { RealPlaysPanel } from './RealPlaysPanel'
 import { ScoreForm } from './ScoreForm'
 import { SessionResults } from './SessionResults'
 import { MatchBanner, TournamentsPanel } from './TournamentsPanel'
@@ -565,6 +566,7 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
                   />
                 </div>
               )}
+              <RealPlaysPanel playerId={playerId} />
               <details className="rounded-xl bg-panel p-5 text-sm">
                 <summary className="cursor-pointer text-muted">{t('Manual score entry (debug)')}</summary>
                 <div className="mt-4 space-y-4">

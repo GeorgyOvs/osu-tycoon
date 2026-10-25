@@ -7,6 +7,7 @@ import { DRILL_LABELS, PRESET_LABELS } from './i18n.keys'
 import { RU_INTEGRITY, RU_INTEGRITY_PATTERNS } from './i18n.ru.integrity'
 import { RU_MENTORS, RU_MENTORS_PATTERNS } from './i18n.ru.mentors'
 import { RU_LEGACY, RU_LEGACY_PATTERNS } from './i18n.ru.legacy'
+import { RU_REAL } from './i18n.ru.real'
 import { RU_REPLAY, RU_REPLAY_PATTERNS } from './i18n.ru.replay'
 import { RU_STORY, RU_STORY_PATTERNS } from './i18n.ru.story'
 import { RU_SEARCH, RU_SEARCH_PATTERNS } from './i18n.ru.search'
@@ -28,6 +29,7 @@ export const RU: Record<string, string> = {
   ...RU_MENTORS,
   ...RU_TEAM,
   ...RU_REPLAY,
+  ...RU_REAL,
   'Announced records (pp at the time of the play)': 'Объявленные рекорды (pp на момент скора)',
   'Open map leaderboard': 'Открыть лидерборд карты',
   'Record withdrawn: the old 1000pp announcement had no verified beatmap score.': 'Рекорд отозван: старое сообщение о 1000pp не было подтверждено скором на карте.',

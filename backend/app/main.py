@@ -11,6 +11,7 @@ from app.models import Player
 from app.routers import spending, hints, profile_page, search, integrity as integrity_router
 from app.routers import beatmaps, career, duels, events, goals, life, play, players, pp, social, teams, week, world
 from app.routers import legacy as legacy_router
+from app.routers import real
 from app.routers import notifications as notifications_router
 from app.services import beatmap_index, tournaments, world_service, score_records
 
@@ -65,6 +66,7 @@ app.include_router(goals.router)
 app.include_router(teams.router)
 app.include_router(legacy_router.router)
 app.include_router(legacy_router.hall)
+app.include_router(real.router)
 
 
 @app.get("/api/health")

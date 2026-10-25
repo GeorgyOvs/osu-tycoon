@@ -625,3 +625,34 @@ class MatchDraft(Base):
     state: Mapped[dict] = mapped_column(JSON, default=dict)
     finished: Mapped[bool] = mapped_column(default=False)
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)
+
+
+class RealPlay(Base):
+    """A play made by hand in the local osu!stable client, read from its scores.db (see stable_files)."""
+
+    __tablename__ = "real_plays"
+    __table_args__ = (UniqueConstraint("player_id", "replay_md5"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id"), index=True)
+    replay_md5: Mapped[str] = mapped_column(String(32))
+    beatmap_md5: Mapped[str] = mapped_column(String(32))
+    beatmap_id: Mapped[int] = mapped_column(Integer, index=True)
+    beatmapset_id: Mapped[int] = mapped_column(Integer, default=0)
+    artist: Mapped[str] = mapped_column(String(256), default="")
+    title: Mapped[str] = mapped_column(String(256), default="")
+    difficulty_name: Mapped[str] = mapped_column(String(256), default="")
+    mods: Mapped[str] = mapped_column(String(32), default="")
+    n300: Mapped[int] = mapped_column(Integer)
+    n100: Mapped[int] = mapped_column(Integer)
+    n50: Mapped[int] = mapped_column(Integer)
+    misses: Mapped[int] = mapped_column(Integer)
+    max_combo: Mapped[int] = mapped_column(Integer)
+    accuracy: Mapped[float] = mapped_column(Float)
+    score_value: Mapped[int] = mapped_column(Integer, default=0)
+    stars: Mapped[float] = mapped_column(Float, default=0.0)
+    pp: Mapped[float] = mapped_column(Float, default=0.0)
+    played_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+    # Plays that existed before the first sync are history, not career events.
+    baseline: Mapped[bool] = mapped_column(default=False)
