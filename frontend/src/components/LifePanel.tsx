@@ -1,7 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { lifeApi, type Player, type Rival, type Shop, type ShopItem } from '../api'
 import { t, tx } from '../i18n'
+import { openNpc } from '../npcBus'
 import { DuelChallenger } from './DuelPanel'
+import { IntegrityPanel } from './IntegrityPanel'
+import { MentorPanel } from './MentorPanel'
+import { SpendingPanel } from './SpendingPanel'
 
 const CATEGORY_LABEL: Record<string, string> = {
   mouse: t('Mouse'),
@@ -231,6 +235,12 @@ export function LifePanel({ player, dateKey, onChanged }: Props) {
                   {r.record.matches_won ?? 0}–{r.record.matches_lost ?? 0}
                 </div>
               </div>
+              <button onClick={() => openNpc({ id: r.npc_id, compare: true })} className="rounded-full bg-panel-light px-2 py-0.5 text-xs hover:bg-osu-pink">
+                ⇄ {t('Compare')}
+              </button>
+              <button onClick={() => openNpc({ id: r.npc_id })} className="rounded-full bg-panel-light px-2 py-0.5 text-xs hover:bg-osu-pink">
+                {t('Profile')}
+              </button>
               <div className="w-24" title={t('How personal it is')}>
                 <div className="h-1.5 rounded-full bg-panel-light">
                   <div className="h-full rounded-full bg-red-500" style={{ width: `${r.heat}%` }} />
@@ -242,6 +252,14 @@ export function LifePanel({ player, dateKey, onChanged }: Props) {
           ))}
         </section>
       )}
+      <details className="rounded-xl bg-panel p-5" open>
+        <summary className="cursor-pointer text-sm uppercase tracking-wider text-muted">{t('Services & perks')}</summary>
+        <div className="mt-4">
+          <SpendingPanel playerId={player.id} dateKey={dateKey} onChanged={onChanged} />
+        </div>
+      </details>
+      <IntegrityPanel playerId={player.id} dateKey={dateKey} onChanged={onChanged} />
+      <MentorPanel playerId={player.id} dateKey={dateKey} onChanged={onChanged} />
     </div>
   )
 }

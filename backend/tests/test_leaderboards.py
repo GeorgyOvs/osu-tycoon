@@ -53,13 +53,15 @@ def test_estimates_scale_with_skill():
     assert mid is not None and top is not None and top.score > mid.score
 
 
-def test_era_meta_blocks_hddt_on_high_ar_before_2013():
-    facts = _facts(stars=2.5, ar=9.5)
+def test_era_meta_keeps_hddt_off_very_high_ar_in_the_first_years_but_dt_is_normal_later():
     comps = world.composites(98, {})
-    early = {lb.estimate_best(comps, facts, date(2011, 6, 1), 3, random.Random(k)).mods for k in range(60)}
-    late = {lb.estimate_best(comps, facts, date(2018, 6, 1), 3, random.Random(k)).mods for k in range(60)}
+    early = {lb.estimate_best(comps, _facts(stars=2.5, ar=9.9), date(2009, 6, 1), 3, random.Random(k)).mods for k in range(60)}
     assert "HDDT" not in early
-    assert "HDDT" in late or "DT" in late
+    mid = {lb.estimate_best(comps, _facts(stars=2.5, ar=9.5), date(2011, 6, 1), 3, random.Random(k)).mods for k in range(60)}
+    assert mid & {"HDDT", "DT"}  # strong players chase the higher multiplier from 2011 on, not only after 2013
+    share = sum(1 for k in range(200) if lb.estimate_best(comps, _facts(stars=2.5, ar=9.5), date(2012, 6, 1), 3,
+                                                          random.Random(k)).mods in ("HDDT", "DT")) / 200
+    assert share > 0.5
 
 
 # --- boards ------------------------------------------------------------------------------------
@@ -152,3 +154,61 @@ def test_anchor_scores_need_a_source_and_respect_dates(client, tmp_path, monkeyp
             leaderboards.anchors()
     finally:
         leaderboards.anchors.cache_clear()
+
+
+def test_takeovers_follow_the_dates_not_the_loop_order():
+    from app.services import leaderboards
+
+    top = {"score": 80, "name": "Old", "npc_id": 1, "legend": False}
+    updates = [
+        {"npc_id": 3, "name": "Cookiezi", "legend": True, "score": 96, "mods": "HD", "accuracy": 99.3, "set_on": date(2012, 7, 5)},
+        {"npc_id": 2, "name": "Margo-Lia", "legend": False, "score": 92, "mods": "", "accuracy": 97.9, "set_on": date(2012, 7, 1)},
+        {"npc_id": 4, "name": "Minmi220", "legend": False, "score": 84, "mods": "HD", "accuracy": 96.5, "set_on": date(2012, 7, 4)},
+    ]
+    result = leaderboards._takeovers(top, updates)
+    assert [(t["name"], t["from"]) for t in result] == [("Margo-Lia", "Old"), ("Cookiezi", "Margo-Lia")]  # Minmi never led
+    assert [t["set_on"] for t in result] == sorted(t["set_on"] for t in result)
+
+
+def test_takeovers_become_news_history_and_threads(client):
+    from app.db import SessionLocal
+    from app.models import BeatmapSet, ForumThread, Player, WorldEvent
+    from app.services import leaderboards
+    from tests.conftest import FIXTURE_BEATMAP_ID, FIXTURE_SET_ID
+
+    pid = client.post("/api/players", json=dict(name="Watcher", country="RU", start_date="2012-08-01", seed=2, age=17)).json()["id"]
+    client.get(f"/api/players/{pid}/beatmaps/{FIXTURE_BEATMAP_ID}/leaderboard")
+    with SessionLocal() as db:
+        player = db.get(Player, pid)
+        bset = db.get(BeatmapSet, FIXTURE_SET_ID)
+        t = lambda name, frm, day, score, legend: {"npc_id": None, "name": name, "legend": legend, "from": frm, "from_legend": False,
+                                                    "score": score, "mods": "HD", "accuracy": 99.0, "set_on": date(2012, 7, day)}
+        leaderboards._announce_takeovers(db, player, bset, FIXTURE_BEATMAP_ID,
+                                         [t("Margo-Lia", "Old", 1, 92, False), t("Cookiezi", "Margo-Lia", 5, 96, True)], player.in_game_date)
+        db.commit()
+        assert db.query(WorldEvent).filter_by(player_id=pid, type="NPC_SNIPE").count() >= 2
+        assert db.query(ForumThread).filter_by(player_id=pid, kind="snipe").count() >= 1
+    board = client.get(f"/api/players/{pid}/beatmaps/{FIXTURE_BEATMAP_ID}/leaderboard").json()
+    history = [(c["sniper"], c["sniped"]) for c in board["first_place_history"]]
+    assert history.index(("Margo-Lia", "Old")) < history.index(("Cookiezi", "Margo-Lia"))
+    dates = [c["date"] for c in board["first_place_history"]]
+    assert dates == sorted(dates)
+
+
+def test_identical_plays_have_identical_pp_whatever_the_date_they_were_set(client):
+    from app.models import MapScore
+    from app.db import SessionLocal
+    from app.services import leaderboards
+
+    pid = client.post("/api/players", json=dict(name="Judge", country="RU", start_date="2013-06-01", seed=2, age=17)).json()["id"]
+    client.get(f"/api/players/{pid}/beatmaps/{FIXTURE_BEATMAP_ID}/leaderboard")
+    with SessionLocal() as db:
+        player = db.get(Player, pid)
+        facts = leaderboards.map_facts(FIXTURE_BEATMAP_ID)
+        for i, day in enumerate((date(2011, 6, 3), date(2012, 9, 22))):
+            db.add(MapScore(player_id=pid, beatmap_id=FIXTURE_BEATMAP_ID, kind="npc", npc_id=900000 + i, name=f"Twin{i}",
+                            country="XX", mods="HDHR", score=999_000_000 - i, accuracy=98.79, max_combo=facts.max_combo,
+                            misses=0, pp=0.0, set_on=day))
+        db.commit()
+        rows = {e.name: e for e in leaderboards.board_entries(db, player, FIXTURE_BEATMAP_ID, 100)}
+    assert rows["Twin0"].pp == rows["Twin1"].pp > 0

@@ -6,7 +6,10 @@ SillyTavern has no inbound webhook, so the bridge is pull-based: the extension p
 
 import random
 
+from datetime import date
+
 from fastapi import APIRouter, Depends, HTTPException, Query
+from pydantic import BaseModel, Field
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
@@ -16,6 +19,7 @@ from app.engine import simulation
 from app.models import ChatMessage, ForumComment, ForumThread, Player, StEvent, Tournament
 from app.routers.players import get_player_or_404
 from app.schemas import (
+    LlmThreadsIn,
     ChatOut,
     DmIn,
     CommentOut,
@@ -27,7 +31,7 @@ from app.schemas import (
     ThreadOut,
     ThreadSummaryOut,
 )
-from app.services import life, media, profile, rivals, st_prompts, world_service
+from app.services import chatter, life, media, profile, rivals, st_prompts, world_service
 
 router = APIRouter(prefix="/api/players/{player_id}", tags=["social"])
 bridge = APIRouter(prefix="/api/st", tags=["sillytavern"])
@@ -93,11 +97,75 @@ def send_dm(player_id: int, body: DmIn, db: Session = Depends(get_db)) -> list[C
     world_service.ensure_world(db, player)
     if rivals.send_dm(db, player, body.to, body.text) is None:
         raise HTTPException(404, f"no player called {body.to} in this world")
+    chatter.dm_fallback(db, player, body.to, body.text)
     db.commit()
     rows = db.scalars(select(ChatMessage).where(ChatMessage.player_id == player.id,
                                                 ChatMessage.channel == f"DM:{body.to}").order_by(ChatMessage.id))
     return [ChatOut(id=m.id, date=m.date, channel=m.channel, author=m.author, content=m.content, source=m.source)
             for m in rows]
+
+
+class ChannelSummary(BaseModel):
+    channel: str
+    last_id: int
+    last_author: str
+    last_content: str
+    last_date: date
+    last_source: str
+    total: int
+
+
+class SayIn(BaseModel):
+    channel: str = Field(min_length=1, max_length=32)
+    text: str = Field(min_length=1, max_length=300)
+
+
+@router.get("/irc/summary", response_model=list[ChannelSummary])
+def irc_summary(player_id: int, db: Session = Depends(get_db)) -> list[ChannelSummary]:
+    """One row per channel or DM with its last line, for the messenger's conversation list."""
+    player = get_player_or_404(db, player_id)
+    latest = (select(func.max(ChatMessage.id)).where(ChatMessage.player_id == player.id)
+              .group_by(ChatMessage.channel).scalar_subquery())
+    totals = dict(db.execute(select(ChatMessage.channel, func.count()).where(ChatMessage.player_id == player.id)
+                             .group_by(ChatMessage.channel)).all())
+    rows = db.scalars(select(ChatMessage).where(ChatMessage.id.in_(latest)).order_by(ChatMessage.id.desc()))
+    out = [ChannelSummary(channel=m.channel, last_id=m.id, last_author=m.author, last_content=m.content,
+                          last_date=m.date, last_source=m.source, total=totals.get(m.channel, 0)) for m in rows]
+    known = {c.channel for c in out}
+    for ch in ("#osu", media.channel_for(player.country)):
+        if ch not in known:
+            out.append(ChannelSummary(channel=ch, last_id=0, last_author="", last_content="", last_date=player.in_game_date,
+                                      last_source="procedural", total=0))
+            known.add(ch)
+    return out
+
+
+@router.post("/irc/say", response_model=ChatOut)
+def say(player_id: int, body: SayIn, db: Session = Depends(get_db)) -> ChatOut:
+    """Talk in a public channel (DMs go through /dm so the other player can answer)."""
+    player = get_player_or_404(db, player_id)
+    if body.channel.startswith("DM:"):
+        raise HTTPException(422, "use /dm to write to a player")
+    channels = set(db.scalars(select(ChatMessage.channel).where(ChatMessage.player_id == player.id).distinct()))
+    if body.channel not in channels | {"#osu", media.channel_for(player.country)}:
+        raise HTTPException(404, f"no channel {body.channel}")
+    m = ChatMessage(player_id=player.id, date=player.in_game_date, channel=body.channel, author=player.name,
+                    content=body.text, source="user")
+    db.add(m)
+    db.flush()
+    chatter.respond(db, player, body.channel, body.text)
+    db.commit()
+    return ChatOut(id=m.id, date=m.date, channel=m.channel, author=m.author, content=m.content, source=m.source)
+
+
+@router.post("/chatter/nudge")
+def nudge_chatter(player_id: int, db: Session = Depends(get_db)) -> dict[str, int]:
+    """The chat panel pings this while it is open: channels keep talking in real time, throttled."""
+    player = get_player_or_404(db, player_id)
+    world_service.ensure_world(db, player)
+    made = chatter.nudge(db, player)
+    db.commit()
+    return {"new_lines": made}
 
 
 @router.get("/irc/channels", response_model=list[str])
@@ -120,11 +188,20 @@ def _event_out(db: Session, player: Player, e: StEvent) -> StEventOut:
     t = db.get(ForumThread, e.thread_id) if e.thread_id else None
     names = media.usernames(db, player, random.Random(f"{player.seed}:st:{e.id}"))
     thread_info = {"id": t.id, "board": t.board, "title": t.title, "body": t.body} if t else None
+    recent = [f"{m.author}: {m.content}" for m in reversed(list(db.scalars(
+        select(ChatMessage).where(ChatMessage.player_id == player.id, ChatMessage.channel == e.channel)
+        .order_by(ChatMessage.id.desc()).limit(12))))]
     if e.type == "DM_REPLY":  # a private conversation: only the NPC's reply is wanted
         prompts = {"dm": st_prompts.dm_prompt(e.payload, e.date)}
+    elif e.type == "AMBIENT_CHATTER":
+        prompts = {"irc": st_prompts.ambient_prompt(e.payload, e.channel, e.date, names, recent)}
+    elif e.type == "CHAT_REPLY":
+        prompts = {"irc": st_prompts.reply_prompt(e.payload, e.channel, e.date, names, recent)}
+    elif e.type == "FORUM_IDEAS":
+        prompts = {"threads": st_prompts.threads_prompt(e.payload, e.date, names)}
     else:
         prompts = {
-            "irc": st_prompts.irc_prompt(e.payload, e.channel, e.date, names),
+            "irc": st_prompts.irc_prompt(e.payload, e.channel, e.date, names, recent),
             "narration": st_prompts.narration_prompt(e.payload, e.date),
         }
     if thread_info:
@@ -132,13 +209,15 @@ def _event_out(db: Session, player: Player, e: StEvent) -> StEventOut:
     return StEventOut(id=e.id, date=e.date, type=e.type, handled=e.handled, channel=e.channel, payload=e.payload,
                       thread=thread_info, prompts=prompts,
                       schemas={"forum": st_prompts.FORUM_SCHEMA, "irc": st_prompts.IRC_SCHEMA,
-                               "dm": st_prompts.IRC_SCHEMA})
+                               "dm": st_prompts.IRC_SCHEMA, "threads": st_prompts.THREADS_SCHEMA})
 
 
 @bridge.get("/careers/{player_id}/events", response_model=list[StEventOut])
 def events(player_id: int, after: int = 0, include_handled: bool = False, limit: int = Query(default=10, le=50),
            db: Session = Depends(get_db)) -> list[StEventOut]:
     player = get_player_or_404(db, player_id)
+    chatter.mark_st_poll(player)  # SillyTavern is listening: chat replies go to the LLM instead of canned lines
+    db.commit()
     q = select(StEvent).where(StEvent.player_id == player.id, StEvent.id > after)
     if not include_handled:
         q = q.where(StEvent.handled.is_(False))
@@ -170,6 +249,26 @@ def add_comments(player_id: int, thread_id: int, body: LlmCommentsIn, db: Sessio
     t.llm_status = "done"
     db.commit()
     return _thread_out(t)
+
+
+@bridge.post("/careers/{player_id}/threads", response_model=list[ThreadOut])
+def add_threads(player_id: int, body: LlmThreadsIn, db: Session = Depends(get_db)) -> list[ThreadOut]:
+    """Whole new discussion threads written by the LLM (not reactions to a game moment)."""
+    player = get_player_or_404(db, player_id)
+    rng = random.Random(f"{player.seed}:llm-threads:{player.in_game_date}:{db.scalar(select(func.count()).select_from(ForumThread))}")
+    made: list[ForumThread] = []
+    for item in body.threads:
+        ups = item.upvotes if item.upvotes is not None else max(1, round(rng.uniform(6, 60) * media.community_size(player.in_game_date)))
+        thread = ForumThread(player_id=player.id, date=player.in_game_date, board=media.board_for(player.in_game_date),
+                             kind="discussion", title=item.title[:300], body=item.body[:4000], author=item.author,
+                             flair=(item.flair or "Discussion")[:32], upvotes=ups, llm_status="done")
+        for c in item.comments:
+            thread.comments.append(ForumComment(author=c.author, content=c.content, source="llm",
+                                                upvotes=c.upvotes if c.upvotes is not None else max(1, ups // 8)))
+        db.add(thread)
+        made.append(thread)
+    db.commit()
+    return [_thread_out(t) for t in made]
 
 
 @bridge.post("/careers/{player_id}/irc", response_model=list[ChatOut])

@@ -258,3 +258,31 @@ def test_traits_reflect_hidden_profile():
     for a in p.attributes:
         a.affinity = 1.3 if a.key in ("snap_aim", "flow_aim", "precision", "distance") else 1.0
     assert S.traits(p) == ["Fast learner", "Natural aim"]
+
+
+def test_every_skill_is_trainable_in_every_era():
+    """No sub-stat may be a dead end: whatever year a career starts, each skill has a drill that trains it."""
+    from datetime import date
+
+    from app.engine import attributes as A
+    from app.engine.training import available_drills
+
+    for year in (2007, 2011, 2013, 2018, 2023):
+        drills = available_drills(date(year, 6, 1))
+        trainable = set(S.PASSIVE_TARGETS)
+        for drill in drills:
+            trainable |= set(drill.targets)
+        missing = set(A.SUBSTATS) - trainable
+        assert not missing, f"{year}: nothing trains {sorted(missing)}"
+
+
+def test_old_school_streams_are_slower_than_stream_practice():
+    from datetime import date
+
+    from app.engine.training import DRILLS, Era
+
+    early = DRILLS["ranked_streams"]
+    assert early.available(date(2008, 1, 1))
+    assert early.efficiency(date(2008, 1, 1)) < 1.0
+    assert DRILLS["stream_practice"].efficiency(date(2013, 1, 1)) > early.efficiency(date(2013, 1, 1))
+    assert early.targets["deathstream"] > 0 and early.available_from == Era.OLD_SCHOOL

@@ -23,7 +23,7 @@ from app.services.sessions import ATTEMPT_OVERHEAD_S, PlayRequest
 
 # Mirror star ratings use today's algorithm and run ~5% above stable's.
 MIRROR_TO_STABLE = 0.95
-MOD_STAR_MULT = {"": 1.0, "HD": 1.04, "HR": 1.08, "DT": 1.45}
+MOD_STAR_MULT = {"": 1.0, "HD": 1.04, "HR": 1.08, "DT": 1.45, "HDHR": 1.12, "HDDT": 1.5, "HDHRDT": 1.63}
 MAX_MAPS = 25
 
 
@@ -60,6 +60,13 @@ PRESETS: dict[str, Preset] = {p.key: p for p in [
            weights={"aim": 0.5, "technical": 0.5}),
     Preset("doubletime", "DT session", "Speed it up: DT on maps you know.", 0.85, 3, mods="DT",
            weights={"tapping": 0.5, "aim": 0.4, "reading": 0.1}, available_from=Era.COMPETITIVE),
+    Preset("hdhr", "HDHR session", "Hidden and HardRock together: tiny circles that vanish.", 0.75, 3, mods="HDHR",
+           weights={"aim": 0.4, "technical": 0.3, "reading": 0.3}),
+    Preset("hddt", "HDDT session", "Hidden and DT together: fast maps you must read on the fly.", 0.78, 3, mods="HDDT",
+           weights={"tapping": 0.35, "aim": 0.3, "reading": 0.35}, available_from=Era.COMPETITIVE),
+    Preset("hdhrdt", "HDHRDT session", "All three at once. Brutal, and the best practice for mod-heavy tournament slots.",
+           0.7, 3, mods="HDHRDT", weights={"aim": 0.4, "tapping": 0.25, "reading": 0.25, "technical": 0.1},
+           available_from=Era.COMPETITIVE),
     Preset("new_ranked", "Newly ranked", "Whatever got ranked in the last couple of months.", 0.85, 2,
            newest_days=60),
 ]}

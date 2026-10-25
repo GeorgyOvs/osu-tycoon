@@ -3,10 +3,12 @@
 from dataclasses import asdict
 
 from fastapi import APIRouter, Depends, HTTPException
+from pydantic import BaseModel
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.engine import play, simulation
+from app.engine import play, psychology, simulation
 from app.routers.career import days_until_match, world_events
 from app.routers.players import get_player_or_404
 from app.routers.pp import beatmap_info
@@ -17,6 +19,7 @@ from app.schemas import (
     PresetOut,
     MapLeaderboardEntryOut,
     MapLeaderboardOut,
+    FirstPlaceChangeOut,
     AttemptOut,
     EventOut,
     MapDemandOut,
@@ -26,12 +29,14 @@ from app.schemas import (
     SessionRequest,
     TimelineBucketOut,
 )
-from app.models import Player, Tournament
+from app.models import Player, SessionLog, Tournament
+from app.engine import commentary
 from app.services import (
     autoplay,
     beatmap_index,
     condition,
     familiarity,
+    mindlock,
     leaderboards,
     media,
     osu_files,
@@ -45,8 +50,15 @@ from app.services import (
 router = APIRouter(prefix="/api/players/{player_id}", tags=["play"])
 
 
-def _attempt_out(ar: sessions.AttemptResult) -> AttemptOut:
+def _attempt_out(ar: sessions.AttemptResult, player=None, r: sessions.PlayResult | None = None,
+                 k: int = 0) -> AttemptOut:
     a = ar.attempt
+    lines = []
+    if player is not None and r is not None:
+        ctx = {"player": player.name, "title": f"{r.meta.artist} - {r.meta.title}", "mods": r.mods, "stars": r.stars,
+               "passed": a.passed, "accuracy": a.accuracy, "misses": a.misses, "grade": a.grade, "choked": a.choked}
+        lines = commentary.play_lines(ar.replay, ctx, player.in_game_date,
+                                      f"{player.seed}:{player.in_game_date}:{r.meta.beatmap_id}:{k}")
     return AttemptOut(
         passed=a.passed,
         fail_progress=a.fail_progress,
@@ -63,6 +75,8 @@ def _attempt_out(ar: sessions.AttemptResult) -> AttemptOut:
         miss_causes=a.miss_causes,
         key_moments=a.key_moments,
         timeline=[TimelineBucketOut(**asdict(b)) for b in a.timeline],
+        replay=ar.replay,
+        commentary=lines,
     )
 
 
@@ -70,7 +84,7 @@ def _attempt_out(ar: sessions.AttemptResult) -> AttemptOut:
 def play_session(player_id: int, body: SessionRequest, db: Session = Depends(get_db)) -> SessionOut:
     player = get_player_or_404(db, player_id)
     requests = [sessions.PlayRequest(p.beatmap_id, p.mods, p.attempts) for p in body.plays]
-    return _run_session(db, player, requests, body.stream)
+    return _run_session(db, player, requests, body.stream, mode="manual")
 
 
 @router.get("/presets", response_model=list[PresetOut])
@@ -92,7 +106,8 @@ def auto_session(player_id: int, body: AutoSessionRequest, db: Session = Depends
     requests = autoplay.plan_session(db, player, preset, body.hours)
     if not requests:
         raise HTTPException(409, "no suitable maps indexed yet for this preset; the index may still be syncing")
-    return _run_session(db, player, requests, body.stream)
+    return _run_session(db, player, requests, body.stream,
+                        replay={"preset": body.preset, "hours": body.hours, "stream": body.stream})
 
 
 @router.post("/sessions/pool", response_model=SessionOut)
@@ -110,7 +125,8 @@ def practice_pool(player_id: int, body: PoolPracticeRequest, db: Session = Depen
     return _run_session(db, player, requests, body.stream)
 
 
-def _run_session(db: Session, player: Player, requests: list[sessions.PlayRequest], stream: bool = False) -> SessionOut:
+def _run_session(db: Session, player: Player, requests: list[sessions.PlayRequest], stream: bool = False,
+                 mode: str = "auto", replay: dict | None = None) -> SessionOut:
     date = player.in_game_date
     days_until_match(db, player, 1)
     rank_before = player.global_rank
@@ -127,7 +143,7 @@ def _run_session(db: Session, player: Player, requests: list[sessions.PlayReques
     db.commit()
     beatmap_index.syncer.request(player.in_game_date)
 
-    return SessionOut(
+    out = SessionOut(
         date=date,
         hours=result.hours,
         plays=[
@@ -135,12 +151,15 @@ def _run_session(db: Session, player: Player, requests: list[sessions.PlayReques
                 beatmap=beatmap_info(r.meta),
                 mods=pp.display_mods(r.mods),
                 stars=r.stars,
-                attempts=[_attempt_out(a) for a in r.attempts],
+                attempts=[_attempt_out(a, player, r, k) for k, a in enumerate(r.attempts)],
                 best_index=r.best_index,
                 score=ScoreOut.model_validate(r.recorded.score) if r.recorded else None,
                 is_new_top_play=bool(r.recorded and r.recorded.top_play_position is not None),
                 top_play_position=r.recorded.top_play_position if r.recorded else None,
                 pp_gained=r.recorded.pp_gained if r.recorded else 0.0,
+                previous_best_pp=r.recorded.previous_best_pp if r.recorded else None,
+                board_rank=r.recorded.board_rank if r.recorded else None,
+                board_size=r.recorded.board_size if r.recorded else None,
             )
             for r in result.plays
         ],
@@ -150,6 +169,44 @@ def _run_session(db: Session, player: Player, requests: list[sessions.PlayReques
         deltas=result.action.deltas,
         player=profile.to_player_out(player),
     )
+    _log_session(db, player, out, mode, replay)
+    return out
+
+
+HISTORY_KEEP = 40
+
+
+def _log_session(db: Session, player: Player, out: SessionOut, mode: str, replay: dict | None = None) -> None:
+    payload = out.model_dump(mode="json")
+    if replay:
+        payload["_replay"] = replay  # how to run the same preset again
+    db.add(SessionLog(player_id=player.id, mode=mode, date=out.date, payload=payload))
+    db.flush()
+    old = list(db.scalars(select(SessionLog.id).where(SessionLog.player_id == player.id)
+                          .order_by(SessionLog.id.desc()).offset(HISTORY_KEEP)))
+    if old:
+        db.execute(delete(SessionLog).where(SessionLog.id.in_(old)))
+    db.commit()
+
+
+class SessionHistoryItem(BaseModel):
+    id: int
+    mode: str
+    result: SessionOut
+    preset: str | None = None
+    hours: float | None = None
+    stream: bool = False
+
+
+@router.get("/sessions/history", response_model=list[SessionHistoryItem])
+def session_history(player_id: int, limit: int = 20, db: Session = Depends(get_db)) -> list[SessionHistoryItem]:
+    """The last play sessions (newest first), so the history survives reloads."""
+    player = get_player_or_404(db, player_id)
+    rows = db.scalars(select(SessionLog).where(SessionLog.player_id == player.id)
+                      .order_by(SessionLog.id.desc()).limit(min(limit, HISTORY_KEEP)))
+    return [SessionHistoryItem(id=r.id, mode=r.mode, result=SessionOut.model_validate(r.payload),
+                               **{k: v for k, v in (r.payload.get("_replay") or {}).items() if k in ("preset", "hours", "stream")})
+            for r in rows]
 
 
 @router.get("/assess/{beatmap_id}", response_model=AssessmentOut)
@@ -170,7 +227,12 @@ def assess(player_id: int, beatmap_id: int, mods: str = "", db: Session = Depend
     seed = f"{player.seed}:{player.in_game_date.isoformat()}:assess:{beatmap_id}:{norm}"
     day = sessions.day_modifiers(player)
     day.familiarity = familiarity.level(db, player, beatmap_id)
-    a = play.assess(prof, condition.play_skills(db, player), norm, day, seed)
+    day.mastery = familiarity.mastery(db, player, beatmap_id)
+    block = mindlock.current(db, player, beatmap_id, day.mastery)
+    day.block_bucket, day.block_severity = block if block else (None, 0.0)
+    fam = psychology.family(prof, norm)
+    conf = psychology.confidence(player, fam, player.in_game_date)
+    a = play.assess(prof, psychology.scale_skills(condition.play_skills(db, player), conf), norm, day, seed)
     return AssessmentOut(
         beatmap=beatmap_info(meta),
         mods=pp.display_mods(norm),
@@ -186,6 +248,11 @@ def assess(player_id: int, beatmap_id: int, mods: str = "", db: Session = Depend
         peak_ratios=a.peak_ratios,
         weakest=a.weakest,
         familiarity=day.familiarity,
+        mastery=day.mastery,
+        block=({"at_seconds": round(mindlock.spot_seconds(block[0], prof.drain_seconds)), "severity": round(block[1], 2)}
+               if block else None),
+        family=fam,
+        confidence=round(conf, 2),
     )
 
 
@@ -208,4 +275,5 @@ def map_leaderboard(player_id: int, beatmap_id: int, limit: int = 50, db: Sessio
         entries=[MapLeaderboardEntryOut(**vars(e)) for e in entries],
         user_rank=you.rank if you else None,
         record_history=[MapLeaderboardEntryOut(**vars(e)) for e in leaderboards.record_history(db, player, beatmap_id)],
+        first_place_history=[FirstPlaceChangeOut(**c) for c in leaderboards.first_place_history(db, player, beatmap_id)],
     )

@@ -132,7 +132,7 @@ class TournamentTemplate:
 
 
 # Base star rating of a tier's first stage, in today's terms (scaled down for older eras).
-TIER_STARS = {"community6": 3.8, "community": 4.6, "open": 5.6, "major": 6.6, "owc": 6.6}
+TIER_STARS = {"community6": 3.8, "community": 4.6, "open": 5.6, "major": 6.6, "owc": 6.6, "clan": 5.4}
 
 TOURNAMENTS: tuple[TournamentTemplate, ...] = (
     TournamentTemplate("6dc_spring", "6 Digit Spring Cup {year}", "community6", 100_000, 10_000_000, 3, 10, first_year=2012),
@@ -146,5 +146,29 @@ TOURNAMENTS: tuple[TournamentTemplate, ...] = (
     TournamentTemplate("roundtable", "The Roundtable {year}", "major", 1, 500, 5, 20, first_year=2015),
     TournamentTemplate("corsace", "Corsace Open {year}", "major", 1, 500, 2, 10, first_year=2018),
     TournamentTemplate("suiji", "Suiji Cup {year}", "major", 1, 500, 8, 25, first_year=2019),
+    TournamentTemplate("clan_spring", "Clan Cup Spring {year}", "clan", 1, 10_000_000, 3, 25, size=16, first_year=2010,
+                       team_size=3),
+    TournamentTemplate("clan_autumn", "Clan Cup Autumn {year}", "clan", 1, 10_000_000, 11, 8, size=16,
+                       first_year=2010, team_size=3),
     TournamentTemplate("owc", "osu! World Cup {year}", "owc", 1, 10_000_000, 10, 20, first_year=2011, team_size=3),
+    # --- the crowded calendar of the upper ranks (generic names; dates are approximate) ---------------------
+    TournamentTemplate("masters_winter", "Winter Masters {year}", "major", 1, 1_000, 1, 15, first_year=2011),
+    TournamentTemplate("invitational_spring", "Spring Invitational {year}", "major", 1, 500, 4, 8, first_year=2011),
+    TournamentTemplate("midsummer", "Midsummer Cup {year}", "major", 1, 1_000, 6, 28, first_year=2011),
+    TournamentTemplate("masters_autumn", "Autumn Masters {year}", "major", 1, 500, 10, 5, first_year=2011),
+    TournamentTemplate("invitational_summer", "Summer Invitational {year}", "major", 1, 1_000, 8, 15, first_year=2011),
+    TournamentTemplate("elite_showdown", "Elite Showdown {year}", "major", 1, 200, 3, 1, size=16, first_year=2012),
+    TournamentTemplate("champions", "Champions Invitational {year}", "major", 1, 100, 11, 28, size=16, first_year=2012),
+    TournamentTemplate("premier_summer", "Premier League Summer {year}", "major", 1, 1_500, 7, 20, first_year=2014),
+    TournamentTemplate("premier_winter", "Premier League Winter {year}", "major", 1, 1_500, 12, 14, first_year=2014),
+    TournamentTemplate("gauntlet", "The Gauntlet {year}", "major", 1, 2_000, 9, 1, first_year=2016),
+    TournamentTemplate("grand_prix", "Grand Prix {year}", "major", 1, 3_000, 5, 1, first_year=2015),
+    # four-digit and upper five-digit ranks, which used to be thin as well
+    TournamentTemplate("open_autumn", "Autumn Open {year}", "open", 1_000, 9_999, 10, 10, first_year=2011),
+    TournamentTemplate("open_february", "February Open {year}", "open", 1_000, 9_999, 2, 8, first_year=2012),
+    TournamentTemplate("open_midyear", "Midyear Open {year}", "open", 1_000, 9_999, 6, 1, first_year=2012),
+    TournamentTemplate("open_plus_spring", "Spring Open Plus {year}", "open", 500, 4_999, 5, 12, first_year=2011),
+    TournamentTemplate("open_plus_autumn", "Autumn Open Plus {year}", "open", 500, 4_999, 11, 3, first_year=2011),
+    TournamentTemplate("5dc_spring", "5 Digit Spring Cup {year}", "community", 10_000, 99_999, 4, 4, first_year=2012),
+    TournamentTemplate("5dc_midyear", "5 Digit Midyear Cup {year}", "community", 10_000, 99_999, 2, 28, first_year=2012),
 )

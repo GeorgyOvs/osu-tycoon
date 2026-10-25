@@ -12,6 +12,7 @@ from datetime import date, timedelta
 from app.engine import attributes as A
 from app.engine.training import Drill
 from app.models import Player, PlayerAttribute
+from app.services import story
 
 HEALTHY, MINOR_STRAIN, SEVERE_RSI = "healthy", "minor_strain", "severe_rsi"
 
@@ -285,15 +286,21 @@ def _train(
         * (1 - player.fatigue / 200)
         * (0.7 if player.injury == MINOR_STRAIN else 1.0)
         * plan.learning
+        * (story.mod_product(player, "pack") if drill.ranked_preset else 1.0)
     )
     targets = dict(PASSIVE_TARGETS) if drill.hands_on else {}
     for key, share in drill.targets.items():
         targets[key] = targets.get(key, 0.0) + share
     # One roll for the whole session (good/bad day), a smaller one per skill.
     day_mult = player.talent * math.exp(FORM_GAIN_WEIGHT * player.form + rng.gauss(0, DAY_NOISE_SIGMA))
+    mentor = (player.story_state or {}).get("mentor") or {}
+    mentor_boost = mentor.get("boost", 1.0) if mentor.get("boost_until", "") >= today.isoformat() else 1.0
     for key, share in targets.items():
         a = attrs[key]
         mult = day_mult * a.affinity * math.exp(rng.gauss(0, SKILL_NOISE_SIGMA))
+        if mentor_boost != 1.0 and A.GROUP_OF[key] == mentor.get("group"):
+            mult *= mentor_boost
+        mult *= story.mod_product(player, f"learn_{A.GROUP_OF[key]}")  # a coach's session, a camp...
         _gain(a, pool * share * mult / (1 + a.plateau / PLATEAU_SCALE), today, plan.caps.get(key))
         a.plateau += share * hours_effect**0.6  # long days saturate, but not completely
         _maybe_breakthrough(player, a, share, rng, today, events)
@@ -302,7 +309,7 @@ def _train(
     load = plan.hours * drill.strain * 2.5 + max(0.0, plan.hours - tolerance) * 6
     if player.consecutive_training_days >= 6 and plan.hours >= 6:
         load += 3  # long sessions with no rest days
-    recovery = 14 * (0.5 + hand / 100)  # a night's sleep: 6h days with a weekly rest are sustainable
+    recovery = 14 * (0.5 + hand / 100) * story.mod_product(player, "recovery")  # a night's sleep: 6h days with a weekly rest are sustainable
     player.fatigue = A.clamp(player.fatigue + load - recovery, 0, 100)
     player.consecutive_training_days += 1
 
@@ -335,7 +342,7 @@ def _maybe_breakthrough(
 
 def _rest(player: Player, attrs: dict[str, PlayerAttribute], plan: DayPlan) -> None:
     hand = effective_value(attrs["hand_stamina"], player.injury)
-    recovery = 25 * (0.5 + hand / 100) + (10 if plan.physio else 0)
+    recovery = (25 * (0.5 + hand / 100) + (10 if plan.physio else 0)) * story.mod_product(player, "recovery")
     player.fatigue = A.clamp(player.fatigue - recovery, 0, 100)
     player.consecutive_training_days = 0
     player.motivation = A.clamp(player.motivation + 3, 0, 100)
@@ -346,7 +353,8 @@ def _rest(player: Player, attrs: dict[str, PlayerAttribute], plan: DayPlan) -> N
 def _risk_multiplier(player: Player, attrs: dict[str, PlayerAttribute], plan: DayPlan) -> float:
     resistance = effective_value(attrs["rsi_resistance"], player.injury)
     strain = plan.drill.strain if plan.drill else 1.0
-    return (1.6 - resistance / 100) * (1.5 - player.ergonomics) * strain
+    harsh = 1.5 if (player.character_build or {}).get("hardcore") else 1.0
+    return (1.6 - resistance / 100) * (1.5 - player.ergonomics) * strain * harsh * story.mod_product(player, "injury")
 
 
 def _injury_step(
@@ -371,7 +379,9 @@ def _injury_step(
         if plan.is_training:
             p = (0.03 + 0.12 * player.fatigue / 100) * _risk_multiplier(player, attrs, plan)
             if rng.random() < p:
-                hiatus = rng.randint(*SEVERE_HIATUS_DAYS)
+                hiatus = max(7, round(rng.randint(*SEVERE_HIATUS_DAYS) * story.mod_product(player, "hiatus")))
+                if (player.character_build or {}).get("hardcore"):
+                    hiatus = round(hiatus * 1.5)
                 player.injury = SEVERE_RSI
                 player.injury_until = today + timedelta(days=hiatus)
                 player.physio_days = 0
@@ -403,12 +413,13 @@ def _injury_expiry(
     if player.injury != SEVERE_RSI or player.injury_until is None or today < player.injury_until:
         return
 
-    if player.physio_days >= PHYSIO_DAYS_TO_AVOID_DAMAGE:
+    hardcore = bool((player.character_build or {}).get("hardcore"))
+    if player.physio_days >= PHYSIO_DAYS_TO_AVOID_DAMAGE * (1.5 if hardcore else 1):
         events.append(Event(today, "INJURY_RECOVERED", "Back from the hiatus: physiotherapy paid off."))
     else:
         losses = {}
         for key in STAMINA_CEILING_KEYS:
-            loss = round(rng.uniform(*PERMANENT_CAP_LOSS), 1)
+            loss = round(rng.uniform(*PERMANENT_CAP_LOSS) * (1.5 if hardcore else 1), 1)
             attrs[key].cap = max(A.ATTR_MIN, attrs[key].cap - loss)
             losses[key] = loss
         events.append(Event(today, "PERMANENT_DAMAGE",
@@ -445,6 +456,14 @@ def traits(player: Player) -> list[str]:
     from app.engine.character import PERKS
     build = player.character_build or {}
     out = [PERKS[p]["label"] for p in build.get("perks", []) if p in PERKS]
+    from app.engine.scenarios import SCENARIOS
+    scenario = SCENARIOS.get(build.get("scenario", "newcomer"))
+    if scenario and scenario.key != "newcomer":
+        out.append(scenario.label)
+    if build.get("hardcore"):
+        out.append("Хардкор")
+    if build.get("economy") == "realistic":
+        out.append("Реалистичная экономика")
     if player.talent >= 1.25:
         out.append("Fast learner")
     elif player.talent <= 0.8:

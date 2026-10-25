@@ -149,3 +149,46 @@ def test_legacy_news_is_retracted_without_erasing_discussion(client):
         assert score_records.repair_legacy_records(db) == 1
         assert old.data['retracted'] and thread.flair == 'Correction' and pending.handled
         assert score_records.repair_legacy_records(db) == 0
+
+
+def test_strong_npc_plays_get_forum_scoreposts_not_only_the_users(client):
+    import random
+
+    pid = career(client)
+    with SessionLocal() as db:
+        player = db.get(Player, pid)
+        npc, score = stored_record(db, player)
+        beatmap = db.get(Beatmap, MAP)
+        before = db.query(ForumThread).filter_by(player_id=pid).count()
+        event = None
+        for seed in range(30):  # the post is probabilistic; a monster play gets one within a few tries
+            event = media.npc_scorepost(db, player, npc, score, beatmap, score.pp, random.Random(seed), user_best_pp=0.0)
+            if event:
+                break
+        assert event is not None
+        thread = db.get(ForumThread, event.thread_id)
+        assert thread.kind == 'scorepost' and thread.title.startswith(f'{npc.name} | ')
+        assert f'{round(score.pp)}pp' in thread.title and beatmap.version in thread.title
+        assert event.payload['data']['score']['player'] == npc.name
+        assert db.query(ForumThread).filter_by(player_id=pid).count() == before + 1
+        # a trivial play by the same player is not worth a thread
+        assert media.npc_scorepost(db, player, npc, score, beatmap, 20.0, random.Random(1)) is None
+
+
+def test_world_pulls_popular_era_maps_it_does_not_have_yet(client, monkeypatch):
+    import random
+
+    from app.services import map_prefetch
+
+    asked = []
+    monkeypatch.setattr(map_prefetch, "prefetcher", type("Rec", (), {"request": lambda self, ids: asked.extend(ids) or len(ids)})())
+    with SessionLocal() as db:
+        from app.services import beatmap_index
+        beatmap_index.upsert_set(db, make_set(50777, date(2012, 1, 1), [880001], stars=[5]))
+        db.commit()
+        score_records._grow_pool(db, date(2016, 1, 1), score_records.cached_map_ids(), random.Random(1))
+    assert 880001 in asked
+    asked.clear()
+    with SessionLocal() as db:
+        score_records._grow_pool(db, date(2011, 1, 1), score_records.cached_map_ids(), random.Random(1))
+    assert 880001 not in asked  # not ranked yet on that date

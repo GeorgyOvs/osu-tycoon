@@ -36,8 +36,10 @@ def get_db() -> Iterator[Session]:
 
 # Bump on every schema change. UPGRADES maps an old version to the SQL that brings it one step
 # forward (new tables are created by create_all afterwards); versions missing here need a fresh DB.
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 16
 UPGRADES: dict[int, list[str]] = {
+    15: ["ALTER TABLE map_scores ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"],
+    14: ["ALTER TABLE players ADD COLUMN story_state JSON NOT NULL DEFAULT '{}'"],
     13: [
         "ALTER TABLE map_scores ADD COLUMN record BOOLEAN NOT NULL DEFAULT 0",
         "UPDATE world_state SET fictional_score_record = 0",

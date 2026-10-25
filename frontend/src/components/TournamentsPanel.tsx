@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useState } from 'react'
 import { t, tx } from '../i18n'
 import { DuelHistory } from './DuelPanel'
+import { DraftRoom } from './DraftRoom'
+import { MapHint } from './MapHint'
+import { slotMods } from '../api.hints'
+import { LiveMatch, WatchReplay, focusPlayer } from './ReplayViewer'
 import {
   starColor,
   worldApi,
+  type MatchCommentary,
   type MatchMap,
   type PoolEntry,
   type TournamentDetail,
@@ -18,29 +23,49 @@ const TIER_LABEL: Record<string, string> = {
   open: t('Open'),
   major: t('Major'),
   owc: t('World Cup'),
+  clan: t('Clan Cup'),
 }
 
 function rankRange(tour: TournamentSummary) {
   if (tour.tier === 'owc') return t("country's top players")
+  if (tour.tier === 'clan') return t('teams of three')
   if (tour.rank_max >= 10_000_000) return `#${tour.rank_min.toLocaleString('en-US')}+`
   return `#${tour.rank_min.toLocaleString('en-US')}–${tour.rank_max.toLocaleString('en-US')}`
 }
 
 /** Map-by-map breakdown of a played match (tournament or 1v1). */
-export function MatchMaps({ maps, names }: { maps: MatchMap[]; names: [string, string] }) {
+export function MatchMaps({
+  maps,
+  names,
+  commentary,
+}: {
+  maps: MatchMap[]
+  names: [string, string]
+  commentary?: MatchCommentary | null
+}) {
   const [a, b] = [{ name: names[0] }, { name: names[1] }]
+  const [live, setLive] = useState(false)
   const played = maps.filter((m): m is MatchMap & { slot: string } => !!m.slot)
   const bans = maps.find((m) => m.bans)?.bans
   if (played.length === 0) return null
+  const watchable = !!commentary && played.some((m) => focusPlayer(m)?.replay)
   return (
     <div className="space-y-1.5">
+      {watchable && !live && (
+        <button onClick={() => setLive(true)} className="rounded bg-osu-pink px-3 py-1 text-xs font-semibold hover:bg-osu-pink-dark">
+          ▶ {t('Watch the match')}
+        </button>
+      )}
+      {watchable && live && commentary && (
+        <LiveMatch maps={maps} commentary={commentary} names={names} onClose={() => setLive(false)} />
+      )}
       {bans && (
         <div className="text-xs text-muted">
           {t('Bans')}: {a?.name} {bans.a.join(', ') || '—'} · {b?.name} {bans.b.join(', ') || '—'}
         </div>
       )}
       {played.map((m, i) => {
-        const aWon = (m.score_a ?? 0) >= (m.score_b ?? 0)
+        const aWon = m.winner ? m.winner === 'a' : (m.score_a ?? 0) > (m.score_b ?? 0)
         return (
           <div key={i} className="space-y-1 rounded bg-bg p-2 text-xs">
             <div className="flex items-center gap-2">
@@ -49,6 +74,11 @@ export function MatchMaps({ maps, names }: { maps: MatchMap[]; names: [string, s
                 {m.title}{' '}
                 {m.stars != null && <span style={{ color: starColor(m.stars) }}>{m.stars.toFixed(2)}★</span>}
               </span>
+              {m.tie && (
+                <span className="rounded bg-amber-500/20 px-1.5 text-amber-300" title={t('Equal scores: the map is decided by accuracy, then misses, then a sudden-death replay.')}>
+                  {t('Tie')}: {m.tie === 'accuracy' ? t('accuracy') : m.tie === 'misses' ? t('misses') : t('sudden death')}
+                </span>
+              )}
               <span className="text-muted">{m.picked_by === 'tb' ? t('tiebreaker') : t('{name} pick', { name: (m.picked_by === 'a' ? a?.name : b?.name) ?? '?' })}</span>
             </div>
             <div className="flex gap-3">
@@ -62,6 +92,11 @@ export function MatchMaps({ maps, names }: { maps: MatchMap[]; names: [string, s
                         <span className={p.kind === 'user' ? 'text-osu-pink' : ''}>{p.name}</span>: {p.accuracy.toFixed(2)}% · {p.combo}/
                         {p.max_combo}x · {p.misses}❌{p.choked && ` · ${t('choked')}`}
                         {p.kind === 'user' && p.key_moments.map((k, n) => <div key={n}>• {tx(k)}</div>)}
+                        <WatchReplay
+                          replay={p.replay}
+                          commentary={p === focusPlayer(m) ? commentary?.maps[i] : undefined}
+                          summary={{ passed: p.passed ?? true, grade: p.grade, accuracy: p.accuracy, misses: p.misses, combo: p.combo, maxCombo: p.max_combo }}
+                        />
                       </div>
                     ))}
                 </div>
@@ -106,7 +141,7 @@ function Bracket({ detail }: { detail: TournamentDetail }) {
                 </button>
                 {open === m.id && (
                   <div className="p-1">
-                    <MatchMaps maps={m.maps} names={[name(m.entry_a), name(m.entry_b)]} />
+                    <MatchMaps maps={m.maps} names={[name(m.entry_a), name(m.entry_b)]} commentary={m.commentary} />
                   </div>
                 )}
               </div>
@@ -263,7 +298,9 @@ function PoolsView({ playerId, detail, onPracticed }: { playerId: number; detail
             {detail.pools[w].map((s) => (
               <div key={s.slot} className="flex gap-2">
                 <span className="w-10 font-bold">{s.slot}</span>
-                <span className="flex-1 truncate">{s.title}</span>
+                <MapHint playerId={playerId} beatmapId={s.beatmap_id} mods={slotMods(s.slot)} className="min-w-0 flex-1 cursor-help truncate">
+                  {s.title}
+                </MapHint>
                 {s.stars != null && <span style={{ color: starColor(s.stars) }}>{s.stars.toFixed(1)}★</span>}
               </div>
             ))}
@@ -333,9 +370,7 @@ export function MatchBanner({ playerId, list, onPlayed }: BannerProps) {
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [names, setNames] = useState<[string, string] | null>(null)
-  const [pool, setPool] = useState<PoolEntry[]>([])
-  const [bans, setBans] = useState<string[]>([])
-  const [picks, setPicks] = useState<string[]>([])
+  const [room, setRoom] = useState(false)
   const pending = list?.pending_match
   const tid = list?.pending_tournament_id
 
@@ -344,12 +379,8 @@ export function MatchBanner({ playerId, list, onPlayed }: BannerProps) {
     worldApi.tournament(playerId, tid).then((d) => {
       const n = (id: number | null) => d.entries.find((e) => e.id === id)?.name ?? '?'
       setNames([n(pending.entry_a), n(pending.entry_b)])
-      setPool((d.pools[String(pending.week)] ?? []).filter((s) => s.slot && s.slot !== 'TB'))
     })
   }, [playerId, pending, tid])
-
-  const toggle = (current: string[], set: (v: string[]) => void, slot: string, max: number) =>
-    set(current.includes(slot) ? current.filter((x) => x !== slot) : current.length < max ? [...current, slot] : current)
 
   if (!pending || !tid || !list) return null
   const today = pending.due <= list.date
@@ -362,51 +393,36 @@ export function MatchBanner({ playerId, list, onPlayed }: BannerProps) {
           <div className="text-xs text-muted">{today ? t('Match day! The calendar waits until you play.') : t('Scheduled for {d}', { d: pending.due })}</div>
         </div>
         {today && (
-          <button
-            disabled={busy}
-            onClick={async () => {
-              setBusy(true)
-              setError(null)
-              try {
-                await worldApi.playMatch(playerId, tid, pending.id, { bans, picks })
-                onPlayed()
-              } catch (e) {
-                setError(tx((e as Error).message))
-              } finally {
-                setBusy(false)
-              }
-            }}
-            className="rounded-full bg-osu-pink px-5 py-2 font-semibold hover:bg-osu-pink-dark disabled:opacity-50"
-          >
-            {busy ? t('Playing…') : t('Play match')}
-          </button>
+          <div className="flex flex-wrap gap-2">
+            <button
+              disabled={busy}
+              onClick={() => setRoom((v) => !v)}
+              className="rounded-full bg-osu-pink px-5 py-2 font-semibold hover:bg-osu-pink-dark disabled:opacity-50"
+            >
+              {room ? t('Draft room') + ' ▾' : t('Open the draft room')}
+            </button>
+            <button
+              disabled={busy}
+              onClick={async () => {
+                setBusy(true)
+                setError(null)
+                try {
+                  await worldApi.playMatch(playerId, tid, pending.id, { bans: [], picks: [] })
+                  onPlayed()
+                } catch (e) {
+                  setError(tx((e as Error).message))
+                } finally {
+                  setBusy(false)
+                }
+              }}
+              className="rounded-full bg-panel-light px-4 py-2 text-xs font-semibold hover:bg-osu-pink disabled:opacity-50"
+            >
+              {busy ? t('Playing…') : t('Auto (AI plays my side)')}
+            </button>
+          </div>
         )}
       </div>
-      {today && pool.length > 0 && (
-        <div className="mt-3 space-y-1 text-xs">
-          <div className="text-muted">
-            {t('Optional plan: click a slot to ban it (up to 2, red), shift-click to queue picks (green, in order). The AI fills the rest.')}
-          </div>
-          <div className="flex flex-wrap gap-1">
-            {pool.map((s) => {
-              const slot = s.slot as string
-              const ban = bans.includes(slot)
-              const pick = picks.indexOf(slot)
-              return (
-                <button
-                  key={slot}
-                  title={s.title}
-                  onClick={(e) => (e.shiftKey ? toggle(picks, setPicks, slot, 8) : toggle(bans, setBans, slot, 2))}
-                  className={`rounded px-2 py-0.5 font-bold ${ban ? 'bg-red-700' : pick >= 0 ? 'bg-green-700' : 'bg-bg hover:bg-panel-light'}`}
-                >
-                  {slot}
-                  {pick >= 0 && <sup>{pick + 1}</sup>}
-                </button>
-              )
-            })}
-          </div>
-        </div>
-      )}
+      {today && room && <DraftRoom playerId={playerId} tournamentId={tid} matchId={pending.id} onPlayed={onPlayed} />}
       {error && <p className="mt-2 text-red-400">{error}</p>}
     </div>
   )

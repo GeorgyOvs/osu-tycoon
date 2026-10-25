@@ -190,6 +190,9 @@ def no_network(monkeypatch):
     fake, stub = FakeMirror(), StubSyncer()
     monkeypatch.setattr(beatmap_index, "default_client", lambda: fake)
     monkeypatch.setattr(beatmap_index, "syncer", stub)
+    from app.services import map_prefetch
+
+    monkeypatch.setattr(map_prefetch, "prefetcher", type("NoPrefetch", (), {"request": lambda self, ids: 0})())
     yield stub
 
 

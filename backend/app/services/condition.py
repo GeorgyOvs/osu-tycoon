@@ -8,7 +8,7 @@ from sqlalchemy.orm import Session
 from app.engine import attributes as A
 from app.engine import gear, simulation
 from app.models import InventoryItem, Player
-from app.services import life
+from app.services import economy, life, setup, story
 
 AIM_SUBS = [s.key for s in A.GROUPS_BY_KEY["aim"].subs] + ["awkward_angles"]
 TAP_SUBS = [s.key for s in A.GROUPS_BY_KEY["tapping"].subs]
@@ -73,11 +73,12 @@ def buy(db: Session, player: Player, key: str) -> InventoryItem:
     price = item.price_on(player.in_game_date)
     if player.money < price:
         raise ShopError(409, f"{item.name} costs ${price:.0f}; you have ${player.money:.0f}")
-    player.money -= price
+    economy.spend(player, price, "gear", player.in_game_date)
     row = InventoryItem(player_id=player.id, item_key=key, bought_on=player.in_game_date, equipped=False)
     db.add(row)
     db.flush()
     equip(db, player, key)
+    setup.reset_wear(player, item.category)  # a new item is unworn
     return row
 
 
@@ -87,19 +88,22 @@ def equip(db: Session, player: Player, key: str) -> None:
     mine = next((r for r in rows if r.item_key == key), None)
     if item is None or mine is None:
         raise ShopError(404, "you don't own that")
+    was_equipped = mine.equipped
     for r in rows:
         other = gear.CATALOG.get(r.item_key)
         if other and other.category == item.category:
             r.equipped = r.item_key == key
     db.flush()
     refresh_ergonomics(db, player)
+    if not was_equipped:
+        setup.on_gear_change(player, item.category)
 
 
 def pay_physio(player: Player, days: int) -> None:
-    cost = PHYSIO_COST_PER_DAY * days
+    cost = PHYSIO_COST_PER_DAY * days * (0.4 if "medical_insurance" in (story.get(player, "subs") or {}) else 1.0)
     if player.money < cost:
         raise ShopError(409, f"{days} days of physiotherapy cost ${cost:.0f}; you have ${player.money:.0f}")
-    player.money -= cost
+    economy.spend(player, cost, "physio", player.in_game_date)
 
 
 # --- performance and learning ----------------------------------------------------------------
@@ -123,11 +127,18 @@ def play_skills(db: Session, player: Player) -> dict[str, float]:
         for key, mult in SINGLETAP_BONUS.items():
             values[key] *= mult
     adaptation = 0.75 + 0.25 * player.style_adaptation  # still getting used to a new setup
-    for key in AIM_SUBS + TAP_SUBS:
-        values[key] *= adaptation
+    play = adaptation * story.mod_product(player, "play")  # faulty gear and the like
+    aim_wear, tap_wear = setup.multipliers(player)  # worn gear and unsettled settings
+    for key in AIM_SUBS:
+        values[key] *= play * aim_wear
+    for key in TAP_SUBS:
+        values[key] *= play * tap_wear
     reaction = life.reaction_multiplier(player)  # reflexes slowly fade past 25
     for key in ("high_ar_reaction", "burst", "snap_aim"):
         values[key] *= reaction
+    for key, mult in story.skill_multipliers(player).items():  # sports psychologist, eye care, headphones...
+        if key in values:
+            values[key] *= mult
     return {k: A.clamp(v) for k, v in values.items()}
 
 
@@ -143,6 +154,7 @@ def set_playstyle(db: Session, player: Player, input_device: str | None, tap_sty
             devices[0][0].equipped = True
         player.input_device = input_device
         player.style_adaptation *= SWITCH_DEVICE
+        setup.on_device_switch(player)
     if tap_style is not None and tap_style != player.tap_style:
         if tap_style not in ("alternate", "singletap"):
             raise ShopError(422, "tap style must be alternate or singletap")
@@ -152,6 +164,7 @@ def set_playstyle(db: Session, player: Player, input_device: str | None, tap_sty
 
 
 def progress_adaptation(player: Player, hours_played: float) -> None:
+    setup.add_hours(player, hours_played)
     player.style_adaptation += (1 - player.style_adaptation) * min(1.0, ADAPTATION_PER_HOUR * hours_played)
 
 
@@ -159,5 +172,7 @@ def learning_extras(db: Session, player: Player) -> tuple[float, dict[str, float
     """(learning-speed multiplier, trainable caps) for the day tick."""
     fx = gear_effects(db, player)
     caps = {"high_ar_reaction": fx.ar_cap} if fx.ar_cap is not None else {}
-    return life.learning_multiplier(player), caps
+    from app.services import teams  # a fresh scrim with the squad speeds learning up a little
+
+    return life.learning_multiplier(player) * teams.learning_multiplier(db, player), caps
 

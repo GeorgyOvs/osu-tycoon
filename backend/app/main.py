@@ -3,13 +3,16 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from app.config import CORS_ORIGINS
 from app.db import SessionLocal, init_db
 from app.models import Player
-from app.routers import beatmaps, career, duels, life, play, players, pp, social, week, world
-from app.services import beatmap_index, world_service, score_records
+from app.routers import spending, hints, profile_page, search, integrity as integrity_router
+from app.routers import beatmaps, career, duels, events, goals, life, play, players, pp, social, teams, week, world
+from app.routers import legacy as legacy_router
+from app.routers import notifications as notifications_router
+from app.services import beatmap_index, tournaments, world_service, score_records
 
 
 @asynccontextmanager
@@ -17,6 +20,9 @@ async def lifespan(_: FastAPI):
     init_db()
     with SessionLocal() as db:
         world_service.prune_removed_legends(db)
+        tournaments.dedupe(db)
+        db.flush()
+        db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_tournament_slot ON tournaments(player_id, template, start_date)"))
         score_records.repair_legacy_records(db)
         db.commit()
         # Resume indexing beatmaps up to the furthest career date.
@@ -36,6 +42,11 @@ app.add_middleware(
 )
 app.include_router(pp.router)
 app.include_router(players.router)
+app.include_router(spending.router)
+app.include_router(hints.router)
+app.include_router(profile_page.router)
+app.include_router(notifications_router.router)
+app.include_router(search.router)
 app.include_router(career.router)
 app.include_router(beatmaps.router)
 app.include_router(play.router)
@@ -45,6 +56,15 @@ app.include_router(social.bridge)
 app.include_router(life.router)
 app.include_router(week.router)
 app.include_router(duels.router)
+app.include_router(integrity_router.router)
+from app.routers import mentors as mentors_router  # noqa: E402
+
+app.include_router(mentors_router.router)
+app.include_router(events.router)
+app.include_router(goals.router)
+app.include_router(teams.router)
+app.include_router(legacy_router.router)
+app.include_router(legacy_router.hall)
 
 
 @app.get("/api/health")

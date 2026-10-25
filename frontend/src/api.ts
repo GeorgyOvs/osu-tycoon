@@ -3,6 +3,7 @@ export interface CharacterOptions {
   perks: Record<string, { label: string; description: string; cost: number }>
   presets: Record<string, { label: string; perks: string[] }>
   conflicts: [string, string][]
+  scenarios?: Record<string, { label: string; description: string; min_age: number }>
 }
 
 export interface BeatmapInfo {
@@ -80,11 +81,11 @@ export interface Life {
 }
 
 export interface Player {
-  character_build?: { preset?: string; perks?: string[]; unbalanced?: boolean }
+  character_build?: { preset?: string; perks?: string[]; unbalanced?: boolean; hardcore?: boolean; economy?: string }
   id: number
   life: Life | null
   pp_system: { key: string; name: string; summary: string; ranking: string; since: string } | null
-  badges: { name: string; tournament_id: number; date: string }[]
+  badges: { name: string; tournament_id: number; date: string; tier?: string }[]
   name: string
   country: string
   in_game_date: string
@@ -121,6 +122,7 @@ export interface Score {
   stars: number
   pp: number
   played_on: string
+  grade?: string
 }
 
 export interface TopPlay extends Score {
@@ -178,7 +180,7 @@ export interface ActionResult {
   scores?: Score[]
 }
 
-async function request<T>(path: string, init?: RequestInit): Promise<T> {
+export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const resp = await fetch(path, {
     ...init,
     headers: { 'Content-Type': 'application/json', ...init?.headers },
@@ -201,9 +203,10 @@ export const api = {
   listPlayers: () => request<Player[]>('/api/players'),
   getPlayer: (id: number) => request<PlayerProfile>(`/api/players/${id}`),
   creationOptions: () => request<CharacterOptions>('/api/players/creation-options'),
-  createPlayer: (body: { name: string; country: string; start_date: string; age?: number; gender?: string; preset?: string; perks?: string[]; unbalanced?: boolean }) =>
+  createPlayer: (body: { name: string; country: string; start_date: string; age?: number; gender?: string; preset?: string; perks?: string[]; unbalanced?: boolean; scenario?: string; hardcore?: boolean; realistic_economy?: boolean }) =>
     request<PlayerProfile>('/api/players', { method: 'POST', body: JSON.stringify(body) }),
-  deletePlayer: (id: number) => request<void>(`/api/players/${id}`, { method: 'DELETE' }),
+  deletePlayer: (id: number, confirmName?: string) =>
+    request<void>(`/api/players/${id}${confirmName ? `?confirm=${encodeURIComponent(confirmName)}` : ''}`, { method: 'DELETE' }),
   calculatePp: (body: PlayInput) =>
     request<PpResponse>('/api/pp/calculate', { method: 'POST', body: JSON.stringify(body) }),
   submitScore: (playerId: number, body: PlayInput) =>
@@ -315,6 +318,36 @@ export interface TimelineBucket {
   reached: boolean
 }
 
+/** Columnar replay data: bucket start times, combo, health, cumulative misses, running accuracy, strain 0-1. */
+export interface Replay {
+  duration: number
+  end: number
+  max_combo: number
+  objects: number
+  t: number[]
+  combo: number[]
+  hp: number[]
+  misses: number[]
+  acc: number[]
+  strain: number[]
+  kind: string[]
+  moments: { t: number; type: string; text: string; n?: number; cause?: string; combo?: number }[]
+}
+
+export interface CommentaryLine {
+  t: number
+  text: string
+  tone: 'neutral' | 'hype' | 'tense' | 'sad'
+  who: string
+}
+
+export interface MatchCommentary {
+  pre: CommentaryLine[]
+  maps: CommentaryLine[][]
+  between: CommentaryLine[][]
+  post: CommentaryLine[]
+}
+
 export interface Attempt {
   passed: boolean
   fail_progress: number | null
@@ -331,6 +364,8 @@ export interface Attempt {
   miss_causes: Record<string, number>
   key_moments: string[]
   timeline: TimelineBucket[]
+  replay?: Replay
+  commentary?: CommentaryLine[]
 }
 
 export interface PlayResult {
@@ -343,6 +378,9 @@ export interface PlayResult {
   is_new_top_play: boolean
   top_play_position: number | null
   pp_gained: number
+  previous_best_pp?: number | null
+  board_rank?: number | null
+  board_size?: number | null
 }
 
 export interface SessionResult {
@@ -371,6 +409,9 @@ export interface MapDemand {
 }
 
 export interface Assessment {
+  block?: { at_seconds: number; severity: number } | null
+  familiarity?: number
+  mastery?: number
   beatmap: BeatmapInfo
   mods: string
   map: MapDemand
@@ -398,6 +439,10 @@ export const playApi = {
     request<Assessment>(`/api/players/${playerId}/assess/${beatmapId}?mods=${encodeURIComponent(mods)}`),
   session: (playerId: number, plays: { beatmap_id: number; mods: string; attempts: number }[]) =>
     request<SessionResult>(`/api/players/${playerId}/sessions`, { method: 'POST', body: JSON.stringify({ plays }) }),
+  history: (playerId: number) =>
+    request<{ id: number; mode: 'auto' | 'manual'; result: SessionResult; preset?: string | null; hours?: number | null; stream?: boolean }[]>(
+      `/api/players/${playerId}/sessions/history?limit=20`,
+    ),
 }
 
 export interface NewsItem {
@@ -484,6 +529,9 @@ export interface MatchPlayer {
   max_combo: number
   choked: boolean
   key_moments: string[]
+  passed?: boolean
+  grade?: string
+  replay?: Replay
 }
 
 export interface MatchMap {
@@ -497,6 +545,55 @@ export interface MatchMap {
   stars?: number
   players?: MatchPlayer[]
   bans?: { a: string[]; b: string[] }
+  winner?: 'a' | 'b'
+  tie?: 'accuracy' | 'misses' | 'sudden_death'
+}
+
+export interface DraftSlot {
+  slot: string
+  family: string
+  mods: string
+  stars: number
+  title: string
+  beatmap_id: number | null
+  state: 'open' | 'banned' | 'picked' | 'played'
+  by: 'a' | 'b' | null
+  legal: boolean
+  score_a?: number
+  score_b?: number
+  winner?: 'a' | 'b'
+}
+
+export interface DraftLogLine {
+  kind: 'ban' | 'pick' | 'tb' | 'result'
+  side: 'a' | 'b' | null
+  slot: string
+  who: string
+  mine: boolean
+  score_a?: number
+  score_b?: number
+}
+
+export interface DraftState {
+  match_id: number
+  tournament_id: number
+  stage: string
+  first_to: number
+  finished: boolean
+  user_side: 'a' | 'b'
+  names: { a: string; b: string }
+  seeds: { a: number; b: number }
+  score: { a: number; b: number }
+  turn: { kind: 'ban' | 'pick' | 'tb' | 'play' | 'done'; side: 'a' | 'b' | null; mine: boolean }
+  legal: string[]
+  slots: DraftSlot[]
+  bans: { a: string[]; b: string[] }
+  first_ban: 'a' | 'b'
+  first_pick: 'a' | 'b'
+  bans_per_side: number
+  log: DraftLogLine[]
+  maps: MatchMap[]
+  warmup: { used: boolean; available: boolean }
 }
 
 export interface TournamentMatch {
@@ -514,6 +611,7 @@ export interface TournamentMatch {
   played_on: string | null
   is_user_match: boolean
   maps: MatchMap[]
+  commentary?: MatchCommentary | null
 }
 
 export interface TournamentEntry {
@@ -569,6 +667,20 @@ export const worldApi = {
       method: 'POST',
       body: JSON.stringify(strategy ?? {}),
     }),
+  draft: (playerId: number, tournamentId: number, matchId: number) =>
+    request<DraftState>(`/api/players/${playerId}/tournaments/${tournamentId}/matches/${matchId}/draft`),
+  draftAct: (playerId: number, tournamentId: number, matchId: number, slot: string) =>
+    request<DraftState>(`/api/players/${playerId}/tournaments/${tournamentId}/matches/${matchId}/draft/act`, {
+      method: 'POST',
+      body: JSON.stringify({ slot }),
+    }),
+  draftAuto: (playerId: number, tournamentId: number, matchId: number) =>
+    request<DraftState>(`/api/players/${playerId}/tournaments/${tournamentId}/matches/${matchId}/draft/auto`, {
+      method: 'POST',
+      body: JSON.stringify({}),
+    }),
+  draftWarmup: (playerId: number, tournamentId: number, matchId: number) =>
+    request<DraftState>(`/api/players/${playerId}/tournaments/${tournamentId}/matches/${matchId}/draft/warmup`, { method: 'POST' }),
   practicePool: (playerId: number, tournamentId: number, week: number, hours: number) =>
     request<SessionResult>(`/api/players/${playerId}/sessions/pool`, {
       method: 'POST',
@@ -592,6 +704,7 @@ export interface Duel {
   score_user: number
   score_npc: number
   won: boolean | null
+  commentary?: MatchCommentary | null
 }
 
 export interface DuelChallenge {
@@ -653,6 +766,10 @@ export const socialApi = {
   irc: (playerId: number, channel: string, afterId = 0) =>
     request<ChatLine[]>(`/api/players/${playerId}/irc?channel=${encodeURIComponent(channel)}&after_id=${afterId}`),
   channels: (playerId: number) => request<string[]>(`/api/players/${playerId}/irc/channels`),
+  summary: (playerId: number) => request<ChannelSummary[]>(`/api/players/${playerId}/irc/summary`),
+  nudge: (playerId: number) => request<{ new_lines: number }>(`/api/players/${playerId}/chatter/nudge`, { method: 'POST' }),
+  say: (playerId: number, channel: string, text: string) =>
+    request<ChatLine>(`/api/players/${playerId}/irc/say`, { method: 'POST', body: JSON.stringify({ channel, text }) }),
   dm: (playerId: number, to: string, text: string) =>
     request<ChatLine[]>(`/api/players/${playerId}/dm`, { method: 'POST', body: JSON.stringify({ to, text }) }),
 }
@@ -679,6 +796,7 @@ export interface MapLeaderboard {
   entries: MapLeaderboardEntry[]
   user_rank: number | null
   record_history?: MapLeaderboardEntry[]
+  first_place_history?: { date: string; sniper: string; sniped: string; score: number; mods: string; accuracy: number }[]
 }
 
 export const leaderboardApi = {
@@ -780,4 +898,43 @@ export interface WeekResult {
 export const weekApi = {
   live: (playerId: number, days: WeekDay[]) =>
     request<WeekResult>(`/api/players/${playerId}/week`, { method: 'POST', body: JSON.stringify({ days }) }),
+}
+
+export interface ChannelSummary {
+  channel: string
+  last_id: number
+  last_author: string
+  last_content: string
+  last_date: string
+  last_source: string
+  total: number
+}
+
+export interface OsuProfile {
+  joined: string
+  global_rank: number | null
+  country_rank: number | null
+  peak_rank: number | null
+  peak_date: string | null
+  pp: number
+  accuracy: number
+  play_count: number
+  ranked_score: number
+  total_score: number
+  level: number
+  level_progress: number
+  total_hits: number
+  max_combo: number
+  play_time_seconds: number
+  grades: Record<'XH' | 'X' | 'SH' | 'S' | 'A', number>
+  followers: number
+  me: string
+  input_device: string
+  tap_style: string
+  history: { date: string; rank: number | null; pp: number }[]
+}
+
+export const profileApi = {
+  get: (id: number) => request<OsuProfile>(`/api/players/${id}/osu-profile`),
+  setMe: (id: number, text: string) => request<OsuProfile>(`/api/players/${id}/me`, { method: 'PUT', body: JSON.stringify({ text }) }),
 }

@@ -1,17 +1,18 @@
-import { useCallback, useEffect, useMemo, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import {
   api,
   fmt,
   playApi,
+  presetApi,
   type ActionResult,
   type Beatmap,
   type BeatmapSet,
   type Player,
   type PlayerProfile,
   type QueuedPlay,
-  type Score,
   type ScoreSubmitResult,
   type SessionResult,
+  type WeekResult,
   type TournamentList,
   worldApi,
 } from '../api'
@@ -20,27 +21,50 @@ import { ActivityLog } from './ActivityLog'
 import { AttributePanel } from './AttributePanel'
 import { BeatmapBrowser } from './BeatmapBrowser'
 import { ForumPanel } from './ForumPanel'
-import { IrcOverlay } from './IrcOverlay'
+import { PlayerAvatar } from './Avatar'
+import { ChatPanel } from './ChatPanel'
+import { useChat } from '../useChat'
+import { searchApi } from '../api.search'
+import { OPEN_DM, OPEN_NPC, type OpenNpc } from '../npcBus'
+import { NpcProfile } from './NpcProfile'
+import { SearchPalette } from './SearchPalette'
 import { LifePanel } from './LifePanel'
 import { PlayPanel, SessionQueue } from './PlayPanel'
 import { QuickSession } from './QuickSession'
-import { PreviewButton } from './PreviewButton'
+import { usePersisted } from '../usePersisted'
 import { ScoreForm } from './ScoreForm'
 import { SessionResults } from './SessionResults'
 import { MatchBanner, TournamentsPanel } from './TournamentsPanel'
+import { storyApi } from '../api.story'
+import { LegacyPanel } from './LegacyPanel'
+import { StoryPanel } from './StoryPanel'
+import { TeamPanel } from './TeamPanel'
+import { OsuProfile } from './OsuProfile'
 import { TrainingPanel } from './TrainingPanel'
 import { WeekPlanner } from './WeekPlanner'
 import { WorldPanel } from './WorldPanel'
+import { NotificationCenter } from './NotificationCenter'
+import { QuickActions } from './QuickActions'
 
-type Tab = 'training' | 'beatmaps' | 'tournaments' | 'world' | 'social' | 'life' | 'scores'
-const TABS: [Tab, string][] = [
-  ['training', t('Training')],
-  ['beatmaps', t('Play')],
-  ['tournaments', t('Tournaments')],
-  ['world', t('World')],
-  ['social', t('Social')],
-  ['life', t('Life')],
-  ['scores', t('Scores')],
+type Tab = 'profile' | 'training' | 'beatmaps' | 'tournaments' | 'world' | 'chat' | 'social' | 'story' | 'team' | 'life' | 'legacy'
+const TAB_LABEL: Record<Tab, string> = {
+  training: t('Training'),
+  beatmaps: t('Play'),
+  profile: t('Profile'),
+  tournaments: t('Tournaments'),
+  world: t('World'),
+  chat: t('Chats'),
+  social: t('Forum'),
+  story: t('Story'),
+  team: t('Team'),
+  life: t('Life'),
+  legacy: t('Legacy'),
+}
+const GROUPS: { key: string; label: string; icon: string; tabs: Tab[] }[] = [
+  { key: 'career', label: t('Career'), icon: '🎯', tabs: ['training', 'beatmaps'] },
+  { key: 'compete', label: t('Compete'), icon: '🏆', tabs: ['tournaments', 'world'] },
+  { key: 'community', label: t('Chat & forum'), icon: '💬', tabs: ['chat', 'social'] },
+  { key: 'me', label: t('Me'), icon: '🧑', tabs: ['profile', 'story', 'team', 'life', 'legacy'] },
 ]
 
 const INJURY_LABELS = {
@@ -90,33 +114,6 @@ function Bar({ label, value, color = 'bg-osu-pink' }: { label: string; value: nu
   )
 }
 
-function ScoreRow({ score, extra }: { score: Score; extra?: React.ReactNode }) {
-  return (
-    <div className="flex items-center gap-3 rounded-lg bg-panel px-3 py-2">
-      <PreviewButton beatmapsetId={score.beatmapset_id} artist={score.artist} title={score.title} />
-      <div className="min-w-0 flex-1">
-        <a
-          href={`https://osu.ppy.sh/b/${score.beatmap_id}`}
-          target="_blank"
-          rel="noreferrer"
-          className="block truncate hover:text-osu-pink"
-        >
-          {score.artist} - {score.title} <span className="text-muted">[{score.difficulty_name}]</span>
-        </a>
-        <div className="text-xs text-muted">
-          {fmt.stars(score.stars)} · {fmt.acc(score.accuracy)} · x{score.max_combo}
-          {score.misses > 0 && <span className="text-red-400"> · {score.misses}❌</span>} · {score.played_on}
-        </div>
-      </div>
-      <span className="rounded bg-panel-light px-2 py-0.5 text-xs font-bold">{fmt.mods(score.mods)}</span>
-      <div className="w-24 text-right">
-        <div className="font-bold text-osu-pink">{fmt.pp(score.pp)}</div>
-        {extra}
-      </div>
-    </div>
-  )
-}
-
 export function Profile({ playerId, onExit }: { playerId: number; onExit: () => void }) {
   const [profile, setProfile] = useState<PlayerProfile | null>(null)
   const [lastResult, setLastResult] = useState<ScoreSubmitResult | null>(null)
@@ -124,12 +121,76 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
   const [tab, setTab] = useState<Tab>('training')
   const [selected, setSelected] = useState<{ beatmap: Beatmap; set: BeatmapSet } | null>(null)
   const [queue, setQueue] = useState<QueuedPlay[]>([])
-  const [session, setSession] = useState<SessionResult | null>(null)
+  const [sessions, setSessions] = useState<
+    { mode: 'auto' | 'manual'; result: SessionResult; replay?: { preset: string; hours: number; stream: boolean } }[]
+  >([])
   const [sessionBusy, setSessionBusy] = useState(false)
   const [sessionError, setSessionError] = useState<string | null>(null)
   const [tournamentList, setTournamentList] = useState<TournamentList | null>(null)
   const [worldVersion, setWorldVersion] = useState(0)
   const [error, setError] = useState<string | null>(null)
+  const [pendingEvents, setPendingEvents] = useState(0)
+  const chat = useChat(playerId)
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [npcView, setNpcView] = useState<{ id: number; compare: boolean } | null>(null)
+  const [dmTarget, setDmTarget] = useState<string | null>(null)
+
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
+        e.preventDefault()
+        setSearchOpen(true)
+      }
+    }
+    const onNpc = (e: Event) => {
+      const d = (e as CustomEvent<OpenNpc>).detail
+      if (d.id != null) setNpcView({ id: d.id, compare: !!d.compare })
+      else if (d.name)
+        searchApi
+          .byName(playerId, d.name)
+          .then((r) => setNpcView({ id: r.id, compare: !!d.compare }))
+          .catch(() => undefined)
+    }
+    const onDm = (e: Event) => {
+      setDmTarget(`DM:${(e as CustomEvent<string>).detail}`)
+      setTab('chat')
+    }
+    window.addEventListener('keydown', onKey)
+    window.addEventListener(OPEN_NPC, onNpc)
+    window.addEventListener(OPEN_DM, onDm)
+    return () => {
+      window.removeEventListener('keydown', onKey)
+      window.removeEventListener(OPEN_NPC, onNpc)
+      window.removeEventListener(OPEN_DM, onDm)
+    }
+  }, [playerId])
+  useEffect(() => {
+    playApi
+      .history(playerId)
+      .then((rows) =>
+        setSessions((cur) =>
+          cur.length
+            ? cur
+            : rows.map((r) => ({
+                mode: r.mode,
+                result: r.result,
+                replay: r.preset ? { preset: r.preset, hours: r.hours ?? 2, stream: !!r.stream } : undefined,
+              })),
+        ),
+      )
+      .catch(() => undefined)
+  }, [playerId])
+  const [playMode, setPlayMode] = usePersisted<'auto' | 'manual'>('play.mode', 'auto')
+  const resultsRef = useRef<HTMLDivElement>(null)
+
+  useEffect(() => {
+    if (sessions.length) resultsRef.current?.scrollIntoView({ behavior: 'smooth', block: 'nearest' })
+  }, [sessions])
+
+  const currentDate = profile?.in_game_date
+  useEffect(() => {
+    storyApi.pendingCount(playerId).then((r) => setPendingEvents(r.pending)).catch(() => setPendingEvents(0))
+  }, [playerId, currentDate, worldVersion, tab])
 
   const reload = useCallback(
     () =>
@@ -178,6 +239,42 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
     void reload()
   }
 
+  const onWeekLived = (week: WeekResult) => {
+    onAction({
+      start_date: week.start_date,
+      end_date: week.end_date,
+      days: week.days.length,
+      events: week.days.flatMap((d) => d.events),
+      deltas: week.deltas,
+      scores: week.scores,
+      player: week.player,
+    })
+    setWorldVersion((v) => v + 1)
+  }
+
+  const pushSession = (
+    mode: 'auto' | 'manual',
+    result: SessionResult,
+    replay?: { preset: string; hours: number; stream: boolean },
+  ) => {
+    setSessions((cur) => [{ mode, result, replay }, ...cur].slice(0, 12))
+    setPlayMode(mode)
+    setWorldVersion((v) => v + 1)
+    void reload()
+  }
+
+  const playAgain = async (r: SessionResult) =>
+    pushSession(
+      'manual',
+      await playApi.session(
+        playerId,
+        r.plays.map((p) => ({ beatmap_id: p.beatmap.beatmap_id, mods: p.mods === 'NM' ? '' : p.mods, attempts: p.attempts.length })),
+      ),
+    )
+
+  const presetAgain = async (rp: { preset: string; hours: number; stream: boolean }) =>
+    pushSession('auto', await presetApi.auto(playerId, rp.preset, rp.hours, rp.stream), rp)
+
   const form = formLabel(profile.form)
 
   const playSession = async () => {
@@ -188,7 +285,7 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
         playerId,
         queue.map((q) => ({ beatmap_id: q.beatmap_id, mods: q.mods, attempts: q.attempts })),
       )
-      setSession(result)
+      setSessions((cur) => [{ mode: 'manual' as const, result }, ...cur].slice(0, 12))
       setQueue([])
       void reload()
     } catch (e) {
@@ -199,10 +296,21 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
   }
 
   return (
-    <div className="mx-auto max-w-5xl space-y-6 px-4 pt-6 pb-24">
-      <IrcOverlay playerId={playerId} />
+    <div className="mx-auto max-w-6xl space-y-6 px-4 pt-6 pb-24">
+      {searchOpen && <SearchPalette playerId={playerId} dateKey={`${profile.in_game_date}:${worldVersion}`} onClose={() => setSearchOpen(false)} />}
+      {npcView && (
+        <NpcProfile
+          key={`${npcView.id}:${npcView.compare}`}
+          playerId={playerId}
+          npcId={npcView.id}
+          dateKey={`${profile.in_game_date}:${worldVersion}`}
+          initialView={npcView.compare ? 'compare' : 'profile'}
+          onClose={() => setNpcView(null)}
+        />
+      )}
       <header className="flex flex-wrap items-center gap-6 rounded-xl bg-panel p-5">
-        <div className="flex-1">
+        <PlayerAvatar playerId={playerId} name={profile.name} size={88} editable />
+        <div className="min-w-0 flex-1">
           <button onClick={onExit} className="text-xs text-muted hover:text-white">
             ← {t('careers')}
           </button>
@@ -213,6 +321,13 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
           >
             {getLang() === 'ru' ? 'RU → EN' : 'EN → RU'}
           </button>
+          <button
+            onClick={() => setSearchOpen(true)}
+            className="ml-3 rounded bg-panel-light px-1.5 text-xs text-muted hover:text-white"
+            title={t('Search maps and players (Ctrl+K)')}
+          >
+            🔍 {t('Search')} <kbd className="text-[10px] opacity-70">⌘K</kbd>
+          </button>
           <h1 className="text-3xl font-bold">
             {profile.name} <span className="text-lg text-muted">[{profile.country}]</span>
           </h1>
@@ -220,15 +335,6 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
             {profile.in_game_date} · {t(profile.era_label)}
             {profile.life && ` · ${t('{n}y', { n: profile.life.age ?? '?' })} · $${Math.round(profile.life.money).toLocaleString('en-US')}`}
           </div>
-          {profile.badges.length > 0 && (
-            <div className="mt-1 flex flex-wrap gap-1">
-              {profile.badges.map((b) => (
-                <span key={b.tournament_id} title={b.date} className="rounded bg-amber-500/20 px-2 py-0.5 text-xs text-amber-300">
-                  🏅 {b.name}
-                </span>
-              ))}
-            </div>
-          )}
           {profile.pp_system && (
             <div className="text-xs text-muted" title={t(profile.pp_system.summary)}>
               {t('Ranking')}: {t(profile.pp_system.name)}
@@ -256,8 +362,31 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
         <Stat label={t('Accuracy')} value={fmt.acc(profile.accuracy)} />
         <Stat label={t('Play count')} value={profile.play_count.toLocaleString('en-US')} />
       </header>
+      <div className="-mt-3 flex flex-wrap items-center justify-between gap-2">
+        <QuickActions
+          player={profile}
+          onAction={onAction}
+          onWeek={onWeekLived}
+          onSession={(result, replay) => {
+            pushSession('auto', result, replay)
+            setTab('beatmaps')
+          }}
+          onTab={(key) => setTab(key as Tab)}
+        />
+        <NotificationCenter
+          playerId={playerId}
+          refreshKey={`${profile.in_game_date}:${worldVersion}`}
+          chatSummary={chat.summary}
+          chatUnread={chat.unread}
+          onOpenTab={(key) => setTab(key as Tab)}
+          onChanged={() => {
+            setWorldVersion((v) => v + 1)
+            void reload()
+          }}
+        />
+      </div>
 
-      <div className="grid gap-6 md:grid-cols-[1fr_2fr]">
+      <div className="grid gap-6 md:grid-cols-[minmax(0,1fr)_minmax(0,2.2fr)]">
         <aside className="space-y-6">
           <AttributePanel
             groups={profile.attributes}
@@ -286,7 +415,7 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
           </section>
         </aside>
 
-        <main className="space-y-6">
+        <main className="min-w-0 space-y-6">
           <InjuryBanner player={profile} />
           <MatchBanner
             playerId={playerId}
@@ -297,18 +426,39 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
               void reload()
             }}
           />
-          <nav className="flex gap-1 rounded-full bg-panel p-1">
-            {TABS.map(([key, label]) => (
-              <button
-                key={key}
-                onClick={() => setTab(key)}
-                className={`flex-1 rounded-full py-1.5 text-sm font-semibold ${
-                  tab === key ? 'bg-osu-pink' : 'text-muted hover:text-white'
-                }`}
-              >
-                {label}
-              </button>
-            ))}
+          <nav className="space-y-1.5">
+            <div className="flex gap-1 rounded-full bg-panel p-1">
+              {GROUPS.map((g) => {
+                const active = g.tabs.includes(tab)
+                const badge = g.key === 'me' ? pendingEvents : g.key === 'community' ? chat.unread.size : 0
+                return (
+                  <button
+                    key={g.key}
+                    onClick={() => !active && setTab(g.tabs[0])}
+                    className={`flex flex-1 items-center justify-center gap-1.5 rounded-full py-1.5 text-sm font-semibold ${
+                      active ? 'bg-osu-pink' : 'text-muted hover:text-white'
+                    }`}
+                  >
+                    <span aria-hidden>{g.icon}</span>
+                    {g.label}
+                    {badge > 0 && <span className="rounded-full bg-white px-1.5 text-[10px] font-bold text-osu-pink">{badge}</span>}
+                  </button>
+                )
+              })}
+            </div>
+            <div className="flex flex-wrap gap-1 px-1">
+              {(GROUPS.find((g) => g.tabs.includes(tab)) ?? GROUPS[0]).tabs.map((key) => (
+                <button
+                  key={key}
+                  onClick={() => setTab(key)}
+                  className={`rounded-full px-3 py-1 text-xs font-semibold ${tab === key ? 'bg-panel-light text-white ring-1 ring-osu-pink' : 'text-muted hover:text-white'}`}
+                >
+                  {TAB_LABEL[key]}
+                  {key === 'story' && pendingEvents > 0 && <span className="ml-1 text-osu-pink">●</span>}
+                  {key === 'chat' && chat.unread.size > 0 && <span className="ml-1 text-osu-pink">●</span>}
+                </button>
+              ))}
+            </div>
           </nav>
 
           {tab === 'training' && (
@@ -335,25 +485,40 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
 
           {tab === 'beatmaps' && (
             <>
-              <QuickSession
-                playerId={playerId}
-                dateKey={profile.in_game_date}
-                disabledReason={profile.injury.state === 'severe_rsi' ? t('Forced hiatus: no playing') : null}
-                onPlayed={(result) => {
-                  setSession(result)
-                  void reload()
-                }}
-              />
-              {session && <SessionResults result={session} labels={labels} />}
-              <details className="rounded-xl bg-panel p-5 text-sm">
-                <summary className="cursor-pointer text-muted">{t('Pick maps yourself (beatmap browser, leaderboards)')}</summary>
-                <div className="mt-4 space-y-6">
-                  <PlayPanel
-                    playerId={playerId}
-                    dateKey={profile.in_game_date}
-                    selected={selected}
-                    onQueue={(q) => setQueue((cur) => [...cur, q])}
-                  />
+              <div className="flex gap-1 rounded-full bg-panel p-1 text-sm">
+                {(
+                  [
+                    ['auto', t('Auto sessions')],
+                    ['manual', t('Pick maps yourself')],
+                  ] as const
+                ).map(([key, label]) => (
+                  <button
+                    key={key}
+                    onClick={() => setPlayMode(key)}
+                    className={`flex-1 rounded-full py-1 font-semibold ${playMode === key ? 'bg-panel-light' : 'text-muted hover:text-white'}`}
+                  >
+                    {label}
+                    {key === 'manual' && queue.length > 0 && (
+                      <span className="ml-1.5 rounded-full bg-osu-pink px-1.5 text-[10px]">{queue.length}</span>
+                    )}
+                  </button>
+                ))}
+              </div>
+
+              {playMode === 'auto' && (
+                <QuickSession
+                  playerId={playerId}
+                  dateKey={profile.in_game_date}
+                  disabledReason={profile.injury.state === 'severe_rsi' ? t('Forced hiatus: no playing') : null}
+                  onPlayed={(result, replay) => {
+                    setSessions((cur) => [{ mode: 'auto' as const, result, replay }, ...cur].slice(0, 12))
+                    void reload()
+                  }}
+                />
+              )}
+
+              {playMode === 'manual' && queue.length > 0 && (
+                <div className="sticky top-2 z-20 max-h-[60vh] overflow-y-auto rounded-xl shadow-lg shadow-black/40">
                   <SessionQueue
                     queue={queue}
                     busy={sessionBusy}
@@ -361,14 +526,45 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
                     onRemove={(i) => setQueue((cur) => cur.filter((_, j) => j !== i))}
                     onPlay={playSession}
                   />
-                  {sessionError && <p className="text-sm text-red-400">{sessionError}</p>}
+                </div>
+              )}
+              {sessionError && <p className="text-sm text-red-400">{sessionError}</p>}
+
+              <div ref={resultsRef} className="scroll-mt-16">
+                {sessions
+                  .filter((s) => s.mode === playMode)
+                  .map((s, i) => (
+                    <div key={`${s.result.date}-${i}-${s.result.plays.length}`} className={i ? 'mt-2' : ''}>
+                      <SessionResults
+                        result={s.result}
+                        labels={labels}
+                        playerId={playerId}
+                        dateKey={profile.in_game_date}
+                        defaultOpen={i === 0}
+                        onPlayAgain={() => playAgain(s.result)}
+                        onPresetAgain={s.replay ? () => presetAgain(s.replay!) : undefined}
+                        presetLabel={s.replay ? t('Same preset ({h}h)', { h: s.replay.hours }) : undefined}
+                      />
+                    </div>
+                  ))}
+              </div>
+
+              {playMode === 'manual' && (
+                <div className="space-y-4">
+                  <PlayPanel
+                    playerId={playerId}
+                    dateKey={profile.in_game_date}
+                    selected={selected}
+                    onQueue={(q) => setQueue((cur) => [...cur, q])}
+                  />
                   <BeatmapBrowser
+                    playerId={playerId}
                     before={profile.in_game_date}
                     selectedId={selected?.beatmap.id ?? null}
                     onSelect={(beatmap, set) => setSelected({ beatmap, set })}
                   />
                 </div>
-              </details>
+              )}
               <details className="rounded-xl bg-panel p-5 text-sm">
                 <summary className="cursor-pointer text-muted">{t('Manual score entry (debug)')}</summary>
                 <div className="mt-4 space-y-4">
@@ -411,37 +607,39 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
             <LifePanel player={profile} dateKey={`${profile.in_game_date}:${worldVersion}`} onChanged={() => void reload()} />
           )}
 
+          {tab === 'legacy' && (
+            <LegacyPanel
+              playerId={playerId}
+              playerName={profile.name}
+              dateKey={`${profile.in_game_date}:${worldVersion}`}
+              onChanged={() => void reload()}
+            />
+          )}
+
+          {tab === 'profile' && <OsuProfile playerId={playerId} profile={profile} dateKey={`${profile.in_game_date}:${worldVersion}`} />}
+
+          {tab === 'story' && (
+            <StoryPanel playerId={playerId} dateKey={`${profile.in_game_date}:${worldVersion}`} onChanged={() => void reload()} />
+          )}
+
+          {tab === 'team' && (
+            <TeamPanel playerId={playerId} dateKey={`${profile.in_game_date}:${worldVersion}`} onChanged={() => void reload()} />
+          )}
+
+          {tab === 'chat' && (
+            <ChatPanel
+              playerId={playerId}
+              playerName={profile.name}
+              summary={chat.summary}
+              unread={chat.unread}
+              markSeen={chat.markSeen}
+              refresh={chat.refresh}
+              initialChannel={dmTarget}
+            />
+          )}
+
           {tab === 'social' && <ForumPanel playerId={playerId} dateKey={`${profile.in_game_date}:${worldVersion}`} />}
 
-          {tab === 'scores' && (
-            <>
-              <section className="space-y-2">
-                <h2 className="text-sm uppercase tracking-wider text-muted">
-                  {t('Best performance')} ({profile.top_plays.length})
-                </h2>
-                {profile.top_plays.length === 0 && <p className="text-sm text-muted">{t('No scores yet.')}</p>}
-                {profile.top_plays.map((s) => (
-                  <ScoreRow
-                    key={s.id}
-                    score={s}
-                    extra={
-                      <div className="text-xs text-muted">
-                        {Math.round(s.weighted_pp)}pp ({Math.round(s.weight * 100)}%)
-                      </div>
-                    }
-                  />
-                ))}
-              </section>
-              {profile.recent_scores.length > 0 && (
-                <section className="space-y-2">
-                  <h2 className="text-sm uppercase tracking-wider text-muted">{t('Recent plays')}</h2>
-                  {profile.recent_scores.map((s) => (
-                    <ScoreRow key={s.id} score={s} />
-                  ))}
-                </section>
-              )}
-            </>
-          )}
         </main>
       </div>
     </div>

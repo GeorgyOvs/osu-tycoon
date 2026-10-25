@@ -121,6 +121,18 @@ export function PlayPanel({ playerId, dateKey, selected, onQueue }: Props) {
               <span className="text-muted">{t('Full combo chance')}</span>
               <span>{Math.round(a.fc_rate * 100)}%</span>
             </div>
+            <div className="flex justify-between" title={t('Familiarity fades in weeks; mastery needs hundreds of attempts and lasts for a year or more.')}>
+              <span className="text-muted">{t('Map knowledge')}</span>
+              <span>
+                {Math.round((a.familiarity ?? 0) * 100)}% · {t('mastery')} {Math.round((a.mastery ?? 0) * 100)}%
+              </span>
+            </div>
+            {a.block && (
+              <div className="rounded bg-amber-500/15 px-2 py-1 text-xs text-amber-200" title={t('A break from the map, a calm clean pass or a bit of luck dissolves it. Mastery weakens it.')}>
+                🔒 {t('Mindlock around {t}: you tense up there', { t: `${Math.floor(a.block.at_seconds / 60)}:${String(a.block.at_seconds % 60).padStart(2, '0')}` })}
+                {a.block.severity >= 0.6 ? ` · ${t('severe')}` : ''}
+              </div>
+            )}
             <div className="flex justify-between">
               <span className="text-muted">{t('Typical pass')}</span>
               <span>

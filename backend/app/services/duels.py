@@ -82,7 +82,7 @@ def challenge(db: Session, player: Player, npc_id: int, best_of: int, kind: str,
         rivals.dm(db, player, npc, "decline", player.in_game_date)
         raise DuelError(409, f"{npc.name} declined: they don't usually play 1v1s with someone {gap:.0f}x lower ranked")
 
-    level = (handled_stars(_user_overall(db, player)) + handled_stars(npc.overall)) / 2
+    level = (handled_stars(_user_overall(db, player)) + handled_stars(world.display_overall(npc.overall))) / 2
     stars = round(level * DIFFICULTY[difficulty] * 1.05, 2)  # mirror stars run ~5% above stable
     slots = [match.Slot(name, stars + (0.25 if name == "TB" else 0.0)) for name in pool_layout(best_of)]
     try:
@@ -131,7 +131,8 @@ def play_duel(db: Session, player: Player, duel: Duel, strategy: dict[str, list[
         tournaments.fill_slots(db, pool, player.in_game_date, random.Random(f"{player.seed}:duel-redraw:{duel.id}"))
 
     advantage, play_map = tournaments.map_simulator(db, player, [_user_competitor(db, player)],
-                                                    [_npc_competitor(npc)], seed_key=f"duel:{duel.id}")
+                                                    [_npc_competitor(npc)], seed_key=f"duel:{duel.id}",
+                                                    opponent_country=npc.country)
     rng = random.Random(f"{player.seed}:duel-match:{duel.id}")
     first_to = (duel.best_of + 1) // 2
     outcome = match.run_match(pool, first_to, advantage, play_map, rng, bans_per_side=duel.bans_per_side,

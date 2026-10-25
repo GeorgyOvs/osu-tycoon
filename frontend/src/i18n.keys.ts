@@ -35,6 +35,10 @@ export const GROUP_LABELS: Record<string, string> = {
 
 export const DRILL_LABELS: Record<string, string> = {
   ranked_pack_grind: 'Ranked Pack Grind',
+  ranked_streams: 'Ranked Stream Maps',
+  ranked_jumps: 'Ranked Jump Maps',
+  ranked_tech: 'Ranked Slider Maps',
+  wrist_care: 'Stretching & Breaks',
   hidden_grind: 'Hidden Grind',
   hardrock_practice: 'HardRock Practice',
   multiplayer_lobbies: 'Multiplayer Lobbies',
@@ -60,6 +64,9 @@ export const PRESET_LABELS: Record<string, string> = {
   hidden: 'Hidden session',
   hardrock: 'HardRock session',
   doubletime: 'DT session',
+  hdhr: 'HDHR session',
+  hddt: 'HDDT session',
+  hdhrdt: 'HDHRDT session',
   new_ranked: 'Newly ranked',
   'pool practice': 'pool practice',
 }

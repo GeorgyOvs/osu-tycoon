@@ -11,10 +11,10 @@ from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from app.engine import attributes as A
-from app.engine import pp_history, simulation, world
+from app.engine import pp_history, simulation, world, world_data
 from app.engine.world_data import LEGENDS
 from app.models import Beatmap, MapScore, Npc, Player, WorldEvent, WorldState
-from app.services import leaderboards, media, profile, rivals, tournaments, score_records
+from app.services import leaderboards, media, profile, rivals, story, tournaments, score_records
 from app.services.tournaments import News
 
 NOTABLE_RANK = 1000
@@ -77,6 +77,9 @@ def real_players(world_seed: int) -> list[world.ProceduralCareer]:
 def ensure_world(db: Session, player: Player) -> WorldState:
     state = db.get(WorldState, player.id)
     if state is not None:
+        if story.get(player, "tournament_templates") != len(world_data.TOURNAMENTS):
+            tournaments.backfill_templates(db, player, state)
+            story.put(player, "tournament_templates", len(world_data.TOURNAMENTS))
         if not state.population_version:
             existing = list(db.scalars(select(Npc).where(Npc.player_id == player.id)))
             taken = {n.name.lower() for n in existing}
@@ -193,11 +196,20 @@ def advance(db: Session, player: Player) -> list[News]:
         out.extend(tournaments.process(db, player, on))
 
     out.extend(_defend_first_places(db, player))
+    leaderboards.advance_stale(db, player)
     era_now = pp_history.era_for(target)
     if era_now.key != era_before.key or era_now.decay:
         pp_before = player.total_pp
         profile.reprice_scores(db, player)
         profile.recompute_aggregates(db, player)
+        if era_now.decay and era_now.key == era_before.key and pp_before > 0 and player.total_pp < pp_before * 0.99:
+            week = target.isocalendar()[:2]
+            if story.get(player, "decay_note") != list(week):
+                story.put(player, "decay_note", list(week))
+                tournaments._news(db, player, target, "PP_DECAY",
+                                  f"Inactivity: your pp is decaying under ppv1 ({pp_before:,.0f}pp -> "
+                                  f"{player.total_pp:,.0f}pp). Playing again stops it.", 1,
+                                  {"pp_before": pp_before, "pp_after": player.total_pp}, out)
         if era_now.key != era_before.key:
             msg = (f"pp system change: {era_now.name}. {era_now.summary} "
                    f"Your total went from {pp_before:,.0f}pp to {player.total_pp:,.0f}pp.")
@@ -209,6 +221,7 @@ def advance(db: Session, player: Player) -> list[News]:
     profile.recompute_aggregates(db, player)
     rivals.weekly(db, player, rank_before)
     out.extend(tournaments.process(db, player, target))
+    story.tick(db, player, out)
     return out
 
 
@@ -313,7 +326,7 @@ def leaderboard(db: Session, player: Player, country: str | None = None, limit: 
     if country:
         q = q.where(Npc.country == country.upper())
     rows = [
-        LeaderboardRow(n.rank, n.name, n.country, n.pp, n.overall, n.kind, n.id, n.status)
+        LeaderboardRow(n.rank, n.name, n.country, n.pp, world.display_overall(n.overall), n.kind, n.id, n.status)
         for n in db.scalars(q.order_by(Npc.pp.desc()).limit(limit * 3))
     ]
     if player.total_pp > 0 and (not country or country.upper() == player.country):

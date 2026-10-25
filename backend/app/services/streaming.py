@@ -70,10 +70,17 @@ def apply(db: Session, player: Player, plays, hours: float) -> list[simulation.E
         if all(not a.attempt.passed for a in p.attempts):
             chat.append(("fail", {}))
 
-    new_followers = max(1, round(hours * (1 + viewers * 0.01) + boost))
-    income = round(hours * viewers * INCOME_PER_VIEWER_HOUR, 2)
+    from app.services import integrity
+
+    from app.services import story
+
+    new_followers = max(1, round((hours * (1 + viewers * 0.01) + boost) * integrity.follower_factor(player)
+                                 * story.mod_product(player, "followers_mult")))
+    income = round(hours * viewers * INCOME_PER_VIEWER_HOUR * story.mod_product(player, "income"), 2)
     player.followers += new_followers
-    player.money += income
+    from app.services import economy
+
+    economy.earn(player, income, "stream", player.in_game_date)
 
     names = media.usernames(db, player, rng, 20)
     for kind, fmt in chat[:6]:

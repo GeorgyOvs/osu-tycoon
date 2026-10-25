@@ -1,4 +1,5 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
+import { MapHint } from './MapHint'
 import {
   formatLength,
   searchBeatmaps,
@@ -25,6 +26,7 @@ interface Props {
   before: string // the player's in-game date
   onSelect: (beatmap: Beatmap, set: BeatmapSet) => void
   selectedId: number | null
+  playerId?: number // enables the skill hint on hover
 }
 
 function DiffChip({ b, selected, onClick }: { b: Beatmap; selected: boolean; onClick: () => void }) {
@@ -44,7 +46,7 @@ function DiffChip({ b, selected, onClick }: { b: Beatmap; selected: boolean; onC
   )
 }
 
-export function BeatmapBrowser({ before, onSelect, selectedId }: Props) {
+export function BeatmapBrowser({ before, onSelect, selectedId, playerId }: Props) {
   const [q, setQ] = useState('')
   const [minStars, setMinStars] = useState('')
   const [maxStars, setMaxStars] = useState('')
@@ -171,7 +173,13 @@ export function BeatmapBrowser({ before, onSelect, selectedId }: Props) {
               </div>
               <div className="flex flex-wrap gap-1">
                 {s.beatmaps.map((b) => (
-                  <DiffChip key={b.id} b={b} selected={b.id === selectedId} onClick={() => onSelect(b, s)} />
+                  playerId ? (
+                    <MapHint key={b.id} playerId={playerId} beatmapId={b.id} day={before}>
+                      <DiffChip b={b} selected={b.id === selectedId} onClick={() => onSelect(b, s)} />
+                    </MapHint>
+                  ) : (
+                    <DiffChip key={b.id} b={b} selected={b.id === selectedId} onClick={() => onSelect(b, s)} />
+                  )
                 ))}
               </div>
             </div>

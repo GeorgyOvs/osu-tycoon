@@ -7,6 +7,7 @@ const KINDS: [string, string][] = [
   ['', t('All')],
   ['scorepost', t('Scoreposts')],
   ['tournament', t('Tournaments')],
+  ['discussion', t('Discussions')],
   ['news', t('News')],
   ['drama', t('Drama')],
   ['milestone', t('Milestones')],

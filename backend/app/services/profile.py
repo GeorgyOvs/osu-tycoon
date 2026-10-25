@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.config import PP_WEIGHT_DECAY
@@ -33,6 +33,9 @@ class Recorded:
     score: Score
     top_play_position: int | None
     pp_gained: float
+    previous_best_pp: float | None = None  # your best pp on this map before this play
+    board_rank: int | None = None  # where this play lands on the map's leaderboard
+    board_size: int | None = None
 
 
 def record_score(
@@ -53,6 +56,7 @@ def record_score(
 ) -> Recorded:
     """Store a passed play and refresh the profile aggregates. Caller commits."""
     old_total = player.total_pp
+    previous = db.scalar(select(func.max(Score.pp)).where(Score.player_id == player.id, Score.beatmap_id == meta.beatmap_id))
     score = Score(
         player_id=player.id,
         beatmap_id=meta.beatmap_id,
@@ -77,6 +81,8 @@ def record_score(
     )
     db.add(score)
     db.flush()
+    if pp_history.era_for(player.in_game_date).decay:
+        reprice_scores(db, player)  # playing again stops the decay of older scores
     top = recompute_aggregates(db, player)
     from app.services import score_records, tournaments, media
     event = score_records.consider(db, player, score, player.in_game_date)
@@ -91,17 +97,21 @@ def record_score(
         significance = min(1.0, pp / (ranking.top_pp(player.in_game_date) / 18))
         player.motivation = min(100.0, player.motivation + NEW_TOP_PLAY_MOTIVATION * significance
                                 * (1 - player.motivation / 100))
-    return Recorded(score, position, player.total_pp - old_total)
+    return Recorded(score, position, player.total_pp - old_total, previous)
 
 
 def reprice_scores(db: Session, player: Player) -> None:
     """Re-evaluate every score under the pp rules of the player's current date."""
     era = pp_history.era_for(player.in_game_date)
-    for s in player_scores(db, player):
+    scores = player_scores(db, player)
+    # ppv1 decay hits inactive players: it counts the days since the last play, not each score's age.
+    idle = max(0, (player.in_game_date - max((s.played_on for s in scores), default=player.in_game_date)).days
+               - pp_history.DECAY_GRACE_DAYS)
+    for s in scores:
         if not s.pp_modern:
             s.pp_modern = s.pp  # scores saved before eras were tracked
         s.pp = pp_history.adjust(s.pp_modern, s.pp_aim, s.pp_speed, s.pp_acc, s.max_combo, s.map_max_combo,
-                                 era, (player.in_game_date - s.played_on).days)
+                                 era, idle)
 
 
 def player_scores(db: Session, player: Player) -> list[Score]:

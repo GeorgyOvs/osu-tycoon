@@ -4,6 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
+from app.engine import commentary
 from app.models import Duel, Npc, Player
 from app.routers.players import get_player_or_404
 from app.schemas import DuelChallengeIn, DuelOut, MatchStrategyIn
@@ -14,11 +15,17 @@ router = APIRouter(prefix="/api/players/{player_id}/duels", tags=["duels"])
 
 def _out(db: Session, d: Duel) -> DuelOut:
     npc = db.get(Npc, d.npc_id)
+    player = db.get(Player, d.player_id)
+    cast = None
+    if d.status == "played" and d.maps and player is not None:
+        cast = commentary.match_commentary(
+            d.maps, on=d.date, seed=f"duel{d.id}", name_a=player.name, name_b=npc.name if npc else "?",
+            user_side="a", first_to=(d.best_of + 1) // 2, stage="1v1 showmatch", winner="a" if d.won else "b")
     return DuelOut(
         id=d.id, date=d.date, opponent=npc.name if npc else "?", opponent_country=npc.country if npc else "XX",
         opponent_rank=npc.rank if npc else None, kind=d.kind, best_of=d.best_of, bans_per_side=d.bans_per_side,
         difficulty=d.difficulty, status=d.status, pool=d.pool, maps=d.maps, score_user=d.score_user,
-        score_npc=d.score_npc, won=d.won,
+        score_npc=d.score_npc, won=d.won, commentary=cast,
     )
 
 

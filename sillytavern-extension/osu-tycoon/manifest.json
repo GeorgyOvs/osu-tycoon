@@ -4,6 +4,6 @@
   "js": "index.js",
   "css": "style.css",
   "author": "osu! Tycoon",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "auto_update": false
 }

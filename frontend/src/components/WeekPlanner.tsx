@@ -2,9 +2,9 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { api, presetApi, weekApi, type Drill, type Player, type SessionPreset, type WeekDay, type WeekResult } from '../api'
 import { locale, statLabel, t, tx } from '../i18n'
 
-const STORAGE_KEY = 'tycoon.weekPlan'
+export const STORAGE_KEY = 'tycoon.weekPlan'
 
-function defaultPlan(occupation: string): WeekDay[] {
+export function defaultPlan(occupation: string): WeekDay[] {
   const weekday: WeekDay = occupation === 'pro'
     ? { type: 'train', drill: 'ranked_pack_grind', hours: 5 }
     : { type: 'train', drill: 'ranked_pack_grind', hours: 2 }

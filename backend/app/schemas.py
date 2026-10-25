@@ -56,6 +56,9 @@ class PlayerCreate(BaseModel):
     preset: str = "random"
     perks: list[str] | None = Field(default=None, max_length=20)
     unbalanced: bool = False
+    scenario: str = "newcomer"  # starting level, see engine/scenarios.py
+    hardcore: bool = False
+    realistic_economy: bool = False
 
 
 class SubStatOut(BaseModel):
@@ -146,6 +149,7 @@ class ScoreOut(BaseModel):
     stars: float
     pp: float
     played_on: date
+    grade: str = ""
 
 
 class TopPlay(ScoreOut):
@@ -299,6 +303,8 @@ class AttemptOut(BaseModel):
     miss_causes: dict[str, int]
     key_moments: list[str]
     timeline: list[TimelineBucketOut]
+    replay: dict = Field(default_factory=dict)
+    commentary: list[dict] = Field(default_factory=list)
 
 
 class PlayOut(BaseModel):
@@ -311,6 +317,9 @@ class PlayOut(BaseModel):
     is_new_top_play: bool
     top_play_position: int | None
     pp_gained: float
+    previous_best_pp: float | None = None
+    board_rank: int | None = None
+    board_size: int | None = None
 
 
 class SessionOut(BaseModel):
@@ -349,6 +358,10 @@ class AssessmentOut(BaseModel):
     peak_ratios: dict[str, float]
     weakest: str
     familiarity: float = 0.0
+    mastery: float = 0.0
+    block: dict | None = None  # mindlock: {at_seconds, severity}
+    family: str | None = None  # kind of map, for confidence
+    confidence: float = 0.0  # -1..1 from recent passes and fails on this kind of map
 
 
 class NewsOut(BaseModel):
@@ -451,6 +464,7 @@ class MatchOut(BaseModel):
     played_on: date | None
     is_user_match: bool
     maps: list[dict]
+    commentary: dict | None = None
 
 
 class TournamentDetailOut(TournamentSummaryOut):
@@ -532,6 +546,25 @@ class LlmCommentsIn(BaseModel):
     comments: list[LlmComment] = Field(max_length=30)
 
 
+class LlmThreadComment(BaseModel):
+    author: str = Field(min_length=1, max_length=48)
+    content: str = Field(min_length=1, max_length=2000)
+    upvotes: int | None = None
+
+
+class LlmThread(BaseModel):
+    title: str = Field(min_length=1, max_length=300)
+    body: str = Field(default="", max_length=4000)
+    author: str = Field(min_length=1, max_length=48)
+    flair: str | None = None
+    upvotes: int | None = None
+    comments: list[LlmThreadComment] = Field(default_factory=list, max_length=15)
+
+
+class LlmThreadsIn(BaseModel):
+    threads: list[LlmThread] = Field(max_length=5)
+
+
 class LlmLine(BaseModel):
     author: str = Field(min_length=1, max_length=48)
     content: str = Field(min_length=1, max_length=1000)
@@ -562,12 +595,22 @@ class MapLeaderboardEntryOut(BaseModel):
     source: str | None
 
 
+class FirstPlaceChangeOut(BaseModel):
+    date: date
+    sniper: str
+    sniped: str
+    score: int
+    mods: str
+    accuracy: float
+
+
 class MapLeaderboardOut(BaseModel):
     beatmap_id: int
     date: date
     entries: list[MapLeaderboardEntryOut]
     user_rank: int | None
     record_history: list[MapLeaderboardEntryOut] = []
+    first_place_history: list[FirstPlaceChangeOut] = []
 
 
 class PresetOut(BaseModel):
@@ -674,3 +717,30 @@ class DuelOut(BaseModel):
     score_user: int
     score_npc: int
     won: bool | None
+    commentary: dict | None = None
+
+
+class DraftActIn(BaseModel):
+    slot: str = Field(min_length=2, max_length=4)
+
+
+class DraftOut(BaseModel):
+    match_id: int
+    tournament_id: int
+    stage: str
+    first_to: int
+    finished: bool
+    user_side: str
+    names: dict[str, str]
+    seeds: dict[str, int]
+    score: dict[str, int]
+    turn: dict
+    legal: list[str]
+    slots: list[dict]
+    bans: dict[str, list[str]]
+    first_ban: str
+    first_pick: str
+    bans_per_side: int
+    log: list[dict]
+    maps: list[dict]
+    warmup: dict

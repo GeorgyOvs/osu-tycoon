@@ -7,12 +7,15 @@ from functools import lru_cache
 
 from sqlalchemy.orm import Session
 
+from app.engine import psychology
 from app.engine import play, pp_history, scoring, simulation
 from app.engine.map_analysis import MapProfile, analyze
 from app.engine.training import ERA_ORDER, Drill
-from app.models import Player
+from app.models import MapBoard, Player
 from app.models import Beatmap
 from app.services import (
+    mindlock,
+    profile_stats,
     beatmap_index,
     condition,
     familiarity,
@@ -49,6 +52,7 @@ class AttemptResult:
     attempt: play.Attempt
     pp: float | None  # under the current era's rules
     perf: pp.PpResult | None = None  # today's formula, with components
+    replay: dict = field(default_factory=dict)
 
 
 @dataclass
@@ -128,6 +132,12 @@ class Played:
 def check_can_play(player: Player) -> None:
     if player.injury == simulation.SEVERE_RSI:
         raise SessionError(409, f"recovering from severe RSI until {player.injury_until}")
+    from app.services import integrity
+
+    try:
+        integrity.check_unrestricted(player)
+    except integrity.IntegrityError as e:
+        raise SessionError(e.status_code, str(e)) from e
 
 
 def _prepare_all(db: Session, player: Player, requests: list[PlayRequest]) -> tuple[list, list[str]]:
@@ -158,21 +168,33 @@ def play_maps(db: Session, player: Player, requests: list[PlayRequest], tag: str
     out = Played([], skipped, 0.0, 0.0, {}, 0.0, 0.0)
     tilt = 0.0
     played_count = 0
+    placements = [0 if tag == "training" else PLACEMENT_BUDGET]
 
     for idx, (req, meta, mods, prof) in enumerate(prepared):
         attempts: list[AttemptResult] = []
+        fam = psychology.family(prof, mods)
+        map_skills = psychology.scale_skills(skills, psychology.confidence(player, fam, player.in_game_date))
         for k in range(req.attempts):
             day.warmup = WARMUP[played_count] if played_count < len(WARMUP) else 1.0
             day.session_hours = out.elapsed / 3600
             day.tilt = tilt
             day.familiarity = familiarity.level(db, player, req.beatmap_id)
+            day.mastery = familiarity.mastery(db, player, req.beatmap_id)
+            block = mindlock.current(db, player, req.beatmap_id, day.mastery)
+            day.block_bucket, day.block_severity = block if block else (None, 0.0)
             rng = random.Random(f"{player.seed}:{player.in_game_date.isoformat()}:{tag}:{idx}:{k}")
-            a = play.simulate(prof, skills, mods, day, rng)
+            a = play.simulate(prof, map_skills, mods, day, rng)
+            note = mindlock.record(db, player, req.beatmap_id, a, len(prof.objects), prof.drain_seconds,
+                                   map_skills["nerve_resistance"], map_skills["tilt_resilience"])
+            if note:
+                a.key_moments.append(note)
+            psychology.record_attempt(player, fam, a.passed, a.choked, a.misses, player.in_game_date)
             familiarity.record_attempt(db, player, req.beatmap_id, 1.0 if a.passed else a.fail_progress or 0.0)
 
             seconds = a.fail_time if a.fail_time is not None else prof.drain_seconds
             out.elapsed += seconds + ATTEMPT_OVERHEAD_S
             out.play_seconds += seconds
+            profile_stats.add_play(player, seconds, a.n300 + a.n100 + a.n50, a.max_combo)
             played_count += 1
             if not a.passed:
                 tilt += 1.0
@@ -196,17 +218,21 @@ def play_maps(db: Session, player: Player, requests: list[PlayRequest], tag: str
                 )
                 score_pp = pp_history.adjust(perf.pp, perf.pp_aim, perf.pp_speed, perf.pp_accuracy, a.max_combo,
                                              prof.max_combo, pp_history.era_for(player.in_game_date))
-            attempts.append(AttemptResult(a, score_pp, perf))
+            attempts.append(AttemptResult(a, score_pp, perf, a.replay(prof)))
 
         passes = [i for i, ar in enumerate(attempts) if ar.pp is not None]
         best = max(passes, key=lambda i: attempts[i].pp or 0.0) if passes else None
-        recorded = _record_best(db, player, req, meta, mods, prof, attempts[best]) if best is not None else None
+        recorded = (_record_best(db, player, req, meta, mods, prof, attempts[best], placements)
+                    if best is not None else None)
         out.plays.append(PlayResult(meta, mods, prof.stars, attempts, best, recorded))
     return out
 
 
+PLACEMENT_BUDGET = 2  # boards that must be simulated from scratch cost ~1-2s each; the rest show up on demand
+
+
 def _record_best(db: Session, player: Player, req: PlayRequest, meta, mods: str, prof: MapProfile,
-                 best: AttemptResult) -> profile.Recorded:
+                 best: AttemptResult, placements: list[int] | None = None) -> profile.Recorded:
     from app.services import leaderboards  # leaderboards needs map_profile from this module
 
     a = best.attempt
@@ -219,6 +245,16 @@ def _record_best(db: Session, player: Player, req: PlayRequest, meta, mods: str,
         pp_aim=perf.pp_aim if perf else 0.0, pp_speed=perf.pp_speed if perf else 0.0,
         pp_acc=perf.pp_accuracy if perf else 0.0, map_max_combo=prof.max_combo,
     )
+    board = db.get(MapBoard, (player.id, req.beatmap_id))
+    fresh = board is not None and board.generated_through >= player.in_game_date
+    if fresh or (placements and placements[0] > 0):
+        if not fresh and placements:
+            placements[0] -= 1
+        placed = leaderboards.placement(db, player, req.beatmap_id, recorded.score.score_value)
+    else:
+        placed = None
+    if placed:
+        recorded.board_rank, recorded.board_size = placed
     snipe = leaderboards.on_user_score(db, player, recorded.score)
     if snipe:
         media.snipe_first_place(db, player, f"{meta.artist} - {meta.title} [{meta.version}]", snipe.sniped,

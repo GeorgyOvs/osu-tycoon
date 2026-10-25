@@ -125,3 +125,21 @@ def test_watching_replays_is_easy_on_the_hands(client):
     assert after["player"]["conditions"]["fatigue"] <= before["conditions"]["fatigue"] + 1
     assert after["player"]["conditions"]["motivation"] >= before["conditions"]["motivation"]
     assert "rhythm_reading" in after["deltas"] and "hand_stamina" not in after["deltas"]
+
+
+def test_ppv1_decay_only_hits_inactive_players(client):
+    from tests.conftest import FIXTURE_BEATMAP_ID
+
+    pid = client.post("/api/players", json=dict(name="D", country="RU", start_date="2013-01-01", seed=4, age=17)).json()["id"]
+    total = lambda: client.get(f"/api/players/{pid}").json()["total_pp"]
+    client.post(f"/api/players/{pid}/scores", json={"beatmap_id": FIXTURE_BEATMAP_ID, "accuracy": 98})
+    fresh = total()
+    client.post(f"/api/players/{pid}/rest", json={"days": 10, "physio": False})
+    assert total() == fresh  # still within the grace period
+    client.post(f"/api/players/{pid}/rest", json={"days": 90, "physio": False})
+    idle = total()
+    assert idle < fresh * 0.95
+    news = client.get(f"/api/players/{pid}/news").json()
+    assert any(n["type"] == "PP_DECAY" for n in news)
+    client.post(f"/api/players/{pid}/scores", json={"beatmap_id": FIXTURE_BEATMAP_ID + 1, "accuracy": 98})
+    assert total() > fresh  # playing again stops the decay of the older score

@@ -12,6 +12,8 @@ import random
 from dataclasses import dataclass, field
 
 from app.engine.map_analysis import HitObject, MapProfile
+from app.engine.replay import Trace
+from app.engine import replay as replay_mod
 
 # Skill (1-115) -> the rosu difficulty value the player handles reliably.
 CAP_BASE, CAP_PER_POINT = 0.6, 0.04
@@ -40,6 +42,9 @@ class DayModifiers:
     pressure: float = 1.0  # choke multiplier: match point / tiebreaker with weak nerves -> up to 3x
     clutch: float = 1.0  # capability multiplier under pressure (Match Clutchness)
     familiarity: float = 0.0  # 0..1 knowledge of this particular map
+    block_bucket: int | None = None  # mindlock: slice of the timeline where the player tenses up
+    block_severity: float = 0.0
+    mastery: float = 0.0  # 0..1 hundreds of attempts: the map is learned by heart (slow to build, slow to fade)
 
     def capability(self, tilt_resilience: float) -> float:
         factor = math.exp(0.035 * self.form)
@@ -50,7 +55,7 @@ class DayModifiers:
         factor *= 1 - 0.015 * self.tilt * max(0.2, 1.3 - tilt_resilience / 100)
         factor *= 1 + (self.morale - 50) / 1000
         factor *= self.clutch
-        factor *= 1 + 0.05 * self.familiarity
+        factor *= 1 + 0.05 * self.familiarity + 0.10 * self.mastery
         return max(0.5, factor)
 
 
@@ -78,6 +83,13 @@ class Attempt:
     key_moments: list[str]
     timeline: list[TimelineBucket] = field(default_factory=list)
     peak_ratios: dict[str, float] = field(default_factory=dict)
+    trace: Trace | None = None
+    fail_index: int | None = None
+    choke_note: tuple | None = None
+
+    def replay(self, profile: MapProfile) -> dict:
+        """Columnar replay data (built on demand from the recorded trace; no randomness)."""
+        return replay_mod.build(profile, self.trace, self.fail_index, self.choke_note) if self.trace else {}
 
 
 def capability(skill: float) -> float:
@@ -197,7 +209,7 @@ def simulate(
     no_fail = "NF" in mods
 
     attempt_quality = rng.gauss(0, ATTEMPT_SIGMA)
-    lapse_sigma = (0.025 + 0.03 * (1 - min(nerve, 100) / 100)) * (1 - 0.3 * day.familiarity)
+    lapse_sigma = (0.025 + 0.03 * (1 - min(nerve, 100) / 100)) * (1 - min(0.6, 0.3 * day.familiarity + 0.25 * day.mastery))
     section_noise: dict[int, float] = {}
 
     hp = 1.0
@@ -215,6 +227,7 @@ def simulate(
     peaks = {"aim": 0.0, "tapping": 0.0, "reading": 0.0, "stamina": 0.0}
     timeline = [TimelineBucket() for _ in range(TIMELINE_BUCKETS)]
     fail_index = None
+    trace = Trace()
     first_time = objs[0].time if objs else 0.0
     recent_causes: list[tuple[str, HitObject]] = []
 
@@ -232,6 +245,7 @@ def simulate(
             combo += 1
             best_run = max(best_run, combo)
             hp = min(1.0, hp + heal_300)
+            trace.add(combo, hp, 300)
             continue
 
         # Demand / capability per dimension, with today's form and the attempt's noise.
@@ -242,7 +256,7 @@ def simulate(
         r_aim = o.aim_demand / (capability(ratios.aim_skill(o, prev)) * factor)
         r_speed, r_bpm, _ = ratios.tapping(o)
         r_tap = max(r_speed, r_bpm) / factor
-        r_read = ratios.reading(i, o) / factor / (1 + 0.15 * day.familiarity)  # known patterns read easier
+        r_read = ratios.reading(i, o) / factor / (1 + 0.15 * day.familiarity + 0.10 * day.mastery)  # known patterns read easier
         elapsed = (o.time - first_time) / 1000
         stamina = 1 + 0.0015 * max(0.0, elapsed - ratios.endurance_s)
 
@@ -250,6 +264,8 @@ def simulate(
         cause = max(dims, key=dims.get)
         r = dims[cause] + 0.15 * sum(max(0.0, v - 0.85) for k, v in dims.items() if k != cause)
         r *= noise
+        if day.block_bucket is not None and abs(min(TIMELINE_BUCKETS - 1, i * TIMELINE_BUCKETS // max(n, 1)) - day.block_bucket) <= 1:
+            r *= 1 + 0.35 * day.block_severity  # the hands shake where the head is stuck
         if stamina > 1.05 and dims[cause] / stamina < 1.0 <= dims[cause]:
             cause = "stamina"
         for k, v in dims.items():
@@ -261,6 +277,7 @@ def simulate(
 
         p_miss = MISS_FLOOR + 1 / (1 + math.exp(-(r - MISS_CENTER) / MISS_WIDTH))
         missed = rng.random() < p_miss
+        points = 0
 
         if not missed and combo > 100:
             # Nerves: the longer the combo and the closer the end, the shakier the hands.
@@ -303,6 +320,7 @@ def simulate(
         else:
             combo += 1
             best_run = max(best_run, combo)
+            points = result
             if result == 300:
                 n300 += 1
                 hp += heal_300
@@ -314,6 +332,7 @@ def simulate(
             hp = min(1.0, hp)
 
         bucket.hp_min = min(bucket.hp_min, max(0.0, hp))
+        trace.add(combo, hp, points, cause if missed else "")
         if hp <= 0:
             if no_fail:
                 hp = 0.0
@@ -350,6 +369,9 @@ def simulate(
         key_moments=moments,
         timeline=timeline,
         peak_ratios=peaks,
+        trace=trace,
+        fail_index=fail_index,
+        choke_note=choke_note,
     )
 
 

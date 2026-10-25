@@ -64,3 +64,20 @@ def counts_from_accuracy(n_objects: int, accuracy: float, misses: int) -> tuple[
     n100 = max(0, min(hits, round(lost * 0.85 / 200)))
     n50 = max(0, min(hits - n100, round(lost * 0.15 / 250)))
     return hits - n100 - n50, n100, n50
+
+
+def stable_grade(accuracy: float, misses: int, mods: str, n_objects: int) -> str:
+    """osu!stable grades (XH/X/SH/S/A/B/C/D) from accuracy and misses; hit counts are reconstructed."""
+    n300, n100, n50 = counts_from_accuracy(max(1, n_objects), accuracy, misses)
+    total = max(1, n300 + n100 + n50 + misses)
+    r300, r50 = n300 / total, n50 / total
+    silver = any(m in (mods or "") for m in ("HD", "FL"))
+    if misses == 0 and n100 == 0 and n50 == 0:
+        return "XH" if silver else "X"
+    if r300 > 0.9 and r50 < 0.01 and misses == 0:
+        return "SH" if silver else "S"
+    if (r300 > 0.8 and misses == 0) or r300 > 0.9:
+        return "A"
+    if (r300 > 0.7 and misses == 0) or r300 > 0.8:
+        return "B"
+    return "C" if r300 > 0.6 else "D"

@@ -1,5 +1,6 @@
 """Tournaments in the living world: calendar, brackets, NPC matches and the user's matches."""
 
+import math
 import random
 from dataclasses import dataclass
 from datetime import date, timedelta
@@ -8,10 +9,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.engine import attributes as A
-from app.engine import bracket, match, play, simulation, world
+from app.engine import bracket, match, network, play, psychology, simulation, world
 from app.engine.world_data import COUNTRIES, TIER_STARS, TOURNAMENTS
 from app.models import Beatmap, BeatmapSet, Match, Npc, Player, Tournament, TournamentEntry, WorldEvent, WorldState
-from app.services import condition, familiarity, media, osu_files, pp, ranking, rivals, sessions
+from app.services import condition, familiarity, media, mindlock, osu_files, pp, ranking, rivals, sessions
 
 REGISTRATION_DAYS = 28
 UNRANKED = 10_000_000
@@ -43,6 +44,48 @@ def _news(db: Session, player: Player, on: date, type_: str, message: str, impor
 # --- calendar ---------------------------------------------------------------------------
 
 
+def _add_once(db: Session, t: Tournament) -> bool:
+    """Insert a tournament unless the same template already runs on that date (a unique index backs this up)."""
+    from sqlalchemy.exc import IntegrityError
+
+    exists = db.scalar(select(Tournament.id).where(Tournament.player_id == t.player_id, Tournament.template == t.template,
+                                                  Tournament.start_date == t.start_date))
+    if exists is not None:
+        return False
+    try:
+        with db.begin_nested():
+            db.add(t)
+            db.flush()
+    except IntegrityError:
+        return False
+    return True
+
+
+def dedupe(db: Session) -> int:
+    """Remove copies of the same tournament (template + start date), keeping the one that was actually played."""
+    from collections import defaultdict
+
+    groups: dict[tuple, list[Tournament]] = defaultdict(list)
+    for t in db.scalars(select(Tournament)):
+        groups[(t.player_id, t.template, t.start_date)].append(t)
+    removed = 0
+    status_rank = {"finished": 2, "ongoing": 1, "upcoming": 0}
+    for copies in groups.values():
+        if len(copies) < 2:
+            continue
+
+        def richness(t: Tournament):
+            user_matches = sum(1 for m in t.matches if m.maps)
+            return (status_rank.get(t.status, 0), user_matches, bool(t.user_registered), -t.id)
+
+        copies.sort(key=richness, reverse=True)
+        for extra in copies[1:]:
+            db.delete(extra)
+            removed += 1
+    db.flush()
+    return removed
+
+
 def generate_through(db: Session, player: Player, state: WorldState, year: int) -> None:
     for y in range(state.generated_through + 1, year + 1):
         for tpl in TOURNAMENTS:
@@ -51,7 +94,7 @@ def generate_through(db: Session, player: Player, state: WorldState, year: int) 
             start = date(y, tpl.month, tpl.day)
             if start < player.in_game_date - timedelta(days=60):
                 continue  # long over before this career began
-            db.add(Tournament(
+            _add_once(db, Tournament(
                 player_id=player.id, template=tpl.key, name=tpl.name.format(year=y), tier=tpl.tier,
                 rank_min=tpl.rank_min, rank_max=tpl.rank_max, size=tpl.size, team_size=tpl.team_size,
                 registration_opens=start - timedelta(days=REGISTRATION_DAYS), start_date=start,
@@ -60,6 +103,28 @@ def generate_through(db: Session, player: Player, state: WorldState, year: int) 
             ))
         state.generated_through = y
     db.flush()
+
+
+def backfill_templates(db: Session, player: Player, state: WorldState) -> int:
+    """Careers created before a template existed get it for the years already generated."""
+    known = set(db.scalars(select(Tournament.template).where(Tournament.player_id == player.id).distinct()))
+    created = 0
+    for tpl in TOURNAMENTS:
+        if tpl.key in known:
+            continue
+        for y in range(player.in_game_date.year, state.generated_through + 1):
+            start = date(y, tpl.month, tpl.day)
+            if not tpl.first_year <= y <= tpl.last_year or start < player.in_game_date - timedelta(days=60):
+                continue
+            created += _add_once(db, Tournament(
+                player_id=player.id, template=tpl.key, name=tpl.name.format(year=y), tier=tpl.tier,
+                rank_min=tpl.rank_min, rank_max=tpl.rank_max, size=tpl.size, team_size=tpl.team_size,
+                registration_opens=start - timedelta(days=REGISTRATION_DAYS), start_date=start,
+                base_stars=round(TIER_STARS[tpl.tier] * match.era_star_factor(start), 2),
+                status="upcoming", user_registered=False, pools={}, winner_entry_id=None,
+            ))
+    db.flush()
+    return created
 
 
 def due_date(t: Tournament, week: int) -> date:
@@ -170,11 +235,67 @@ def _owc_field(db: Session, player: Player, t: Tournament, rng: random.Random, t
     return field
 
 
+def _npc_squads(db: Session, player: Player, t: Tournament, rng: random.Random, taken: set[str], count: int,
+                center_pp: float, exclude: set[int]) -> list[dict]:
+    """`count` NPC squads of three with strength around `center_pp`; fillers cover any shortfall."""
+    from app.engine import teams as rules
+    npcs = [n for n in db.scalars(select(Npc).where(Npc.player_id == player.id, Npc.status == "active"))
+            if n.rank and n.id not in exclude]
+    npcs.sort(key=lambda n: abs(math.log((n.pp + 1) / (center_pp + 1))))
+    pool = npcs[: count * OWC_TEAM_SIZE]
+    rng.shuffle(pool)
+    names = {n.lower() for n in taken}
+    squads = []
+    for i in range(count):
+        members = [_npc_member(n) for n in pool[i * OWC_TEAM_SIZE:(i + 1) * OWC_TEAM_SIZE]]
+        while len(members) < OWC_TEAM_SIZE:
+            rank = float(user_rank(player)) if player.global_rank else 50_000.0
+            members.append(_filler(rng, t, taken, rank=rank * rng.uniform(0.6, 1.6)))
+        name, _ = rules.team_name(rng, names)
+        names.add(name.lower())
+        squads.append({"name": name, "country": members[0]["country"], "kind": "team", "npc_id": None,
+                       "pp": sum(m["pp"] for m in members) / len(members), "seed": rng.randint(0, 2**31 - 1),
+                       "composites": _mean_comps(members), "members": members, "includes_user": False})
+    return squads
+
+
+def _clan_field(db: Session, player: Player, t: Tournament, rng: random.Random, taken: set[str],
+                out: list) -> list[dict]:
+    from app.services import teams
+    squad = teams.cup_squad(db, player) if t.user_registered else None
+    field = []
+    exclude: set[int] = set()
+    center = 0.0
+    if t.user_registered and squad is None:
+        t.user_registered = False
+        _news(db, player, t.start_date, "TEAM_CUP_WITHDRAWN",
+              f"Your team couldn't field a squad for {t.name}.", 2, {"tournament_id": t.id}, out)
+    if squad is not None:
+        team, members = squad
+        exclude = {m["npc_id"] for m in members if m["npc_id"]}
+        comps = _mean_comps(members)
+        center = sum(m["pp"] for m in members) / len(members)
+        field.append({"name": team.name, "country": player.country, "kind": "team", "npc_id": None, "pp": center,
+                      "seed": rng.randint(0, 2**31 - 1), "composites": {**comps, "_chemistry": team.chemistry},
+                      "members": members, "includes_user": True})
+    if not center:
+        pps = sorted(n.pp for n in db.scalars(select(Npc).where(Npc.player_id == player.id, Npc.status == "active"))
+                     if n.rank)
+        center = pps[len(pps) // 2] if pps else 100.0
+    field += _npc_squads(db, player, t, rng, taken, t.size - len(field), max(center, 1.0), exclude)
+    return field
+
+
 def start(db: Session, player: Player, t: Tournament, out: list) -> None:
     rng = random.Random(f"{player.seed}:tournament:{t.id}")
     taken = set(db.scalars(select(Npc.name).where(Npc.player_id == player.id)))
-    field = _owc_field(db, player, t, rng, taken, out) if t.tier == "owc" else _solo_field(db, player, t, rng, taken)
-    if t.tier != "owc" and t.user_registered:
+    if t.tier == "owc":
+        field = _owc_field(db, player, t, rng, taken, out)
+    elif t.tier == "clan":
+        field = _clan_field(db, player, t, rng, taken, out)
+    else:
+        field = _solo_field(db, player, t, rng, taken)
+    if t.tier not in ("owc", "clan") and t.user_registered:
         field = _qualifiers(db, player, t, field, rng, out)
     else:
         field.sort(key=lambda e: -e["pp"])  # seed by strength
@@ -206,7 +327,9 @@ def _qualifiers(db: Session, player: Player, t: Tournament, field: list[dict], r
     """Everyone plays the first-stage pool once (TB excluded); seeds follow the totals."""
     slots = [s for s in pool_for(t, 1) if s.slot != "TB"]
     known = [familiarity.level(db, player, s.beatmap_id) for s in slots if s.beatmap_id]
-    practice = 1 + 0.05 * (sum(known) / len(known) if known else 0.0)  # practising the pool pays off
+    deep = [familiarity.mastery(db, player, s.beatmap_id) for s in slots if s.beatmap_id]
+    practice = (1 + 0.05 * (sum(known) / len(known) if known else 0.0)
+                + 0.10 * (sum(deep) / len(deep) if deep else 0.0))  # practising the pool pays off
     results = []
     for e in field:
         if e["kind"] == "user":
@@ -273,7 +396,7 @@ def _form(db: Session, e: TournamentEntry) -> float:
 
 
 # First-place prize per tier (USD, era-agnostic); places below get a share.
-PRIZES = {"community6": 25, "community": 100, "open": 400, "major": 3000, "owc": 6000}
+PRIZES = {"community6": 25, "community": 100, "open": 400, "major": 3000, "owc": 6000, "clan": 900}
 PLACE_SHARE = {"1st": 1.0, "2nd": 0.5, "3rd": 0.3, "4th": 0.2, "5th–6th": 0.1, "7th–8th": 0.07}
 
 
@@ -283,9 +406,17 @@ def _pay_prize(db: Session, player: Player, t: Tournament, entry: TournamentEntr
         return
     amount = PRIZES.get(t.tier, 0) * share / max(1, t.team_size)
     if amount:
-        player.money += amount
+        from app.services import economy
+
+        amount = economy.earn(player, amount, "prize", on)
         _news(db, player, on, "PRIZE", f"Prize money from {t.name}: ${amount:,.0f} ({entry.placement}).", 1,
               {"tournament_id": t.id, "amount": amount}, out)
+
+
+def _team_result(db: Session, player: Player, t: Tournament, entry: TournamentEntry, on: date, out: list) -> None:
+    if t.tier == "clan" and entry is not None and entry.includes_user:
+        from app.services import teams
+        teams.on_cup_result(db, player, t, entry, on, out)
 
 
 def _finish_match(db: Session, player: Player, t: Tournament, m: Match, winner_side: str, on: date,
@@ -297,10 +428,12 @@ def _finish_match(db: Session, player: Player, t: Tournament, m: Match, winner_s
     if loser:
         loser.placement = bracket.placement(m.key, t.size)
         _pay_prize(db, player, t, loser, on, out)
+        _team_result(db, player, t, loser, on, out)
     if m.key == "GF":
         champion = _entry(t, m.winner)
         champion.placement = "1st"
         _pay_prize(db, player, t, champion, on, out)
+        _team_result(db, player, t, champion, on, out)
         t.winner_entry_id = champion.id
         t.status = "finished"
         importance = 3 if t.tier in ("major", "owc") else 2
@@ -308,7 +441,7 @@ def _finish_match(db: Session, player: Player, t: Tournament, m: Match, winner_s
             _news(db, player, on, "TOURNAMENT_WIN", f"You won {t.name}!", 3, {"tournament_id": t.id}, out)
             if t.tier in BADGE_TIERS:
                 player.badges = [*(player.badges or []), {"name": t.name, "tournament_id": t.id,
-                                                          "date": on.isoformat()}]
+                                                          "date": on.isoformat(), "tier": t.tier}]
         else:
             _news(db, player, on, "TOURNAMENT_WINNER", f"{champion.name} wins {t.name}.", importance,
                   {"tournament_id": t.id, "npc_id": champion.npc_id}, out)
@@ -361,9 +494,16 @@ def forfeit(db: Session, player: Player, t: Tournament, m: Match, reason: str) -
     winner = "b" if user_side == "a" else "a"
     m.score_a, m.score_b = (0, m.first_to) if user_side == "a" else (m.first_to, 0)
     m.maps = [{"forfeit": reason}]
+    from sqlalchemy import delete as _delete
+    from app.models import MatchDraft
+
+    db.execute(_delete(MatchDraft).where(MatchDraft.match_id == m.id))  # a half-played draft goes with it
     _finish_match(db, player, t, m, winner, player.in_game_date, out)
     _news(db, player, player.in_game_date, "FORFEIT", f"You forfeited your {m.stage} match at {t.name}: {reason}.", 2,
           {"tournament_id": t.id, "match_id": m.id}, out)
+    from app.services import integrity
+
+    integrity.adjust_reputation(player, -3, "forfeit")
     out.extend(process(db, player, player.in_game_date))
     return out
 
@@ -417,6 +557,12 @@ def register(db: Session, player: Player, t: Tournament) -> None:
         raise TournamentError(409, "registration has closed")
     if today < t.registration_opens:
         raise TournamentError(409, f"registration opens on {t.registration_opens}")
+    if t.tier == "clan":
+        from app.services import teams
+        if teams.cup_squad(db, player) is None:
+            raise TournamentError(409, "you need a team with two active teammates to enter a clan cup")
+        t.user_registered = True
+        return
     if not eligible(player, t):
         bws = seeding_rank(player, t)
         label = f"BWS rank #{round(bws):,}" if round(bws) != user_rank(player) else f"rank #{user_rank(player):,}"
@@ -518,6 +664,7 @@ def _competitors(db: Session, player: Player, e: TournamentEntry) -> list[_Compe
     members = e.members or [{"name": e.name, "kind": e.kind, "npc_id": e.npc_id, "composites": e.composites,
                              "seed": e.composites.get("_seed", e.seed)}]
     out = []
+    chemistry = e.composites.get("_chemistry")
     for m in members:
         if m["kind"] == "user":
             day = sessions.day_modifiers(player)
@@ -530,6 +677,11 @@ def _competitors(db: Session, player: Player, e: TournamentEntry) -> list[_Compe
             form = npc.form if npc else 0.0
             out.append(_Competitor(m["name"], m["kind"], world.substats(comps, m.get("seed", 0)), form,
                                    play.DayModifiers(form=form), m.get("seed", 0), m.get("npc_id")))
+    if chemistry is not None and e.includes_user:  # a well-drilled team keeps its nerve together
+        from app.engine import teams as rules
+        for c in out:
+            for key in ("nerve_resistance", "clutch"):
+                c.skills[key] = A.clamp(c.skills[key] * rules.nerve_factor(chemistry))
     return out
 
 
@@ -539,14 +691,18 @@ def _side_comps(comps: list[_Competitor]) -> dict[str, float]:
 
 
 # Peak viewers of a tournament stream by tier (scaled by era community size and stage).
-MATCH_VIEWERS = {"community6": 0, "community": 30, "open": 300, "major": 4000, "owc": 20000}
+MATCH_VIEWERS = {"community6": 0, "community": 30, "open": 300, "major": 4000, "owc": 20000, "clan": 150}
 
 
 def map_simulator(db: Session, player: Player, side_a: list["_Competitor"], side_b: list["_Competitor"],
-                  seed_key: str, no_fail: bool = True):
+                  seed_key: str, no_fail: bool = True, opponent_country: str | None = None):
     """(advantage, play_map) callbacks for match.run_match: every map simulated note by note for
     everyone on both sides, ScoreV2, pressure on decisive maps, the user's map knowledge."""
     comps_a, comps_b = _side_comps(side_a), _side_comps(side_b)
+    from app.services import setup as setup_service
+
+    ping_ms = setup_service.ping_to(player, opponent_country) if opponent_country else 0
+    ping_factor = network.pressure_factor(ping_ms) if opponent_country else 1.0
 
     def advantage(s: match.Slot) -> float:
         return world.slot_strength(comps_a, s.slot) - world.slot_strength(comps_b, s.slot)
@@ -556,16 +712,41 @@ def map_simulator(db: Session, player: Player, side_a: list["_Competitor"], side
         prof = sessions.map_profile(s.beatmap_id, mods)
         detail = {"beatmap_id": s.beatmap_id, "title": s.title, "mods": s.mods or "NM", "stars": round(prof.stars, 2),
                   "players": []}
+        if opponent_country:
+            detail["ping_ms"] = ping_ms
+            if ping_factor > 1.0:
+                detail["ping_note"] = f"{ping_ms} ms to your opponent: lag spikes make you jumpy"
         totals = []
+        today = player.in_game_date
+        fam = psychology.family(prof, mods)
         for side_name, side in (("a", side_a), ("b", side_b)):
             total = 0
             for i, c in enumerate(side):
                 day = play.DayModifiers(**vars(c.day))
                 day.pressure, day.clutch = play.match_pressure(c.skills["nerve_resistance"], c.skills["clutch"], decisive)
+                skills = c.skills
                 if c.kind == "user":
                     day.familiarity = familiarity.level(db, player, s.beatmap_id)
+                    day.mastery = familiarity.mastery(db, player, s.beatmap_id)
+                    day.pressure *= ping_factor  # lag spikes against someone far away
+                    skills = psychology.scale_skills(skills, psychology.confidence(player, fam, today))
+                    rattled = max((psychology.fear(player, o.npc_id, today)
+                                   for o in (side_b if side_name == "a" else side_a)), default=0.0)
+                    day.pressure *= psychology.pressure_multiplier(rattled)
+                    if decisive:
+                        day.clutch *= psychology.clutch_factor(player)
                 rng = random.Random(f"{player.seed}:{seed_key}:{s.slot}:{side_name}:{i}")
-                attempt = play.simulate(prof, c.skills, mods, day, rng)
+                if c.kind == "user":
+                    block = mindlock.current(db, player, s.beatmap_id, day.mastery)
+                    day.block_bucket, day.block_severity = block if block else (None, 0.0)
+                attempt = play.simulate(prof, skills, mods, day, rng)
+                if c.kind == "user":
+                    note = mindlock.record(db, player, s.beatmap_id, attempt, len(prof.objects), prof.drain_seconds,
+                                           skills["nerve_resistance"], skills["tilt_resilience"])
+                    if note:
+                        attempt.key_moments.append(note)
+                if c.kind == "user":
+                    psychology.record_attempt(player, fam, attempt.passed, attempt.choked, attempt.misses, today)
                 if c.kind == "user":
                     familiarity.record_attempt(db, player, s.beatmap_id, 1.0 if attempt.passed else attempt.fail_progress or 0)
                 score = play.score_v2(attempt, prof, s.mods)
@@ -574,15 +755,19 @@ def map_simulator(db: Session, player: Player, side_a: list["_Competitor"], side
                     "side": side_name, "name": c.name, "kind": c.kind, "score": score,
                     "accuracy": round(attempt.accuracy, 2), "misses": attempt.misses, "combo": attempt.max_combo,
                     "max_combo": prof.max_combo, "choked": attempt.choked, "key_moments": attempt.key_moments,
+                    "passed": attempt.passed, "grade": attempt.grade, "replay": attempt.replay(prof),
                 })
             totals.append(total)
+        if decisive:
+            user_side = next((j for j, sd in enumerate((side_a, side_b)) if any(c.kind == "user" for c in sd)), None)
+            if user_side is not None:
+                psychology.record_decisive(player, totals[user_side] > totals[1 - user_side])
         return totals[0], totals[1], detail
 
     return advantage, play_map
 
 
-def play_user_match(db: Session, player: Player, t: Tournament, m: Match,
-                    strategy: dict[str, list[str]] | None = None) -> tuple[match.MatchOutcome, list[News]]:
+def assert_playable(db: Session, player: Player, t: Tournament, m: Match) -> None:
     pending = pending_user_match(db, player)
     if pending is None or pending[1].id != m.id:
         raise TournamentError(409, "this isn't your next match")
@@ -591,14 +776,24 @@ def play_user_match(db: Session, player: Player, t: Tournament, m: Match,
     if due_date(t, m.week) > player.in_game_date:
         raise TournamentError(409, f"this match is scheduled for {due_date(t, m.week)}")
 
+
+def user_match_context(db: Session, player: Player, t: Tournament, m: Match):
+    """Everything both the one-click match and the interactive draft need: pool, entries, competitors and the
+    advantage/play callbacks of the note-by-note simulation."""
     pool = _validate_pool(db, t, m.week)
     a, b = _entry(t, m.entry_a), _entry(t, m.entry_b)
     side_a, side_b = _competitors(db, player, a), _competitors(db, player, b)
-    advantage, play_map = map_simulator(db, player, side_a, side_b, seed_key=f"{m.id}")
-    rng = random.Random(f"{player.seed}:usermatch:{m.id}")
-    user_side_key = "a" if a.includes_user else "b"
-    outcome = match.run_match(pool, m.first_to, advantage, play_map, rng, bans_per_side=2 if m.week >= 4 else 1,
-                              prefs={user_side_key: strategy} if strategy else None)
+    opponent_entry = b if a.includes_user else a
+    advantage, play_map = map_simulator(db, player, side_a, side_b, seed_key=f"{m.id}",
+                                        opponent_country=opponent_entry.country)
+    return pool, a, b, side_a, side_b, advantage, play_map
+
+
+def finish_user_match(db: Session, player: Player, t: Tournament, m: Match, outcome: match.MatchOutcome,
+                      a: TournamentEntry, b: TournamentEntry, side_a: list, side_b: list) -> list[News]:
+    """Store the result of the user's match and apply every consequence. The bracket moves exactly once."""
+    if m.winner is not None:
+        raise TournamentError(409, "this match has already been played")
     m.score_a, m.score_b = outcome.score_a, outcome.score_b
     m.maps = [{"slot": r.slot, "picked_by": r.picked_by, "score_a": r.score_a, "score_b": r.score_b, **r.detail}
               for r in outcome.maps] + [{"bans": outcome.bans}]
@@ -606,7 +801,6 @@ def play_user_match(db: Session, player: Player, t: Tournament, m: Match,
     user_side = "a" if a.includes_user else "b"
     won = outcome.winner == user_side
     _finish_match(db, player, t, m, outcome.winner, player.in_game_date, out)
-
     # Consequences: morale, a tiring day, and rivalries with the NPCs involved.
     player.morale = A.clamp(player.morale + (8 if won else -6), 0, 100)
     viewers = MATCH_VIEWERS.get(t.tier, 0) * media.community_size(player.in_game_date) * (1 + 0.25 * (m.week - 1))
@@ -620,6 +814,7 @@ def play_user_match(db: Session, player: Player, t: Tournament, m: Match,
     opponent = b if user_side == "a" else a
     opp_side = side_b if user_side == "a" else side_a
     rivals.on_match(db, player, [c.npc_id for c in opp_side if c.npc_id], won)
+    psychology.record_match(player, [c.npc_id for c in opp_side if c.npc_id], won, player.in_game_date)
     for c in opp_side:
         npc = db.get(Npc, c.npc_id) if c.npc_id else None
         if npc is None or not won:
@@ -634,6 +829,9 @@ def play_user_match(db: Session, player: Player, t: Tournament, m: Match,
     media.tournament_match(db, player, t, m, user_entry, opponent, won, upset)
     if won and m.key == "GF":
         media.tournament_victory(db, player, t, user_entry)
+        from app.services import integrity
+
+        integrity.adjust_reputation(player, 2, "tournament win")
     if upset:
         moments = [p["key_moments"] for p in m.maps[-2].get("players", []) if p.get("key_moments")] if len(m.maps) > 1 else []
         _news(db, player, player.in_game_date, "TOURNAMENT_UPSET",
@@ -641,4 +839,13 @@ def play_user_match(db: Session, player: Player, t: Tournament, m: Match,
               f"(seed {opponent.seed}) {max(m.score_a, m.score_b)}-{min(m.score_a, m.score_b)} in {m.stage}.", 3,
               {"tournament_id": t.id, "match_id": m.id, "key_moments": moments[:2]}, out)
     out.extend(process(db, player, player.in_game_date))
-    return outcome, out
+    return out
+
+
+def play_user_match(db: Session, player: Player, t: Tournament, m: Match,
+                    strategy: dict[str, list[str]] | None = None) -> tuple[match.MatchOutcome, list[News]]:
+    """One click: the AI plays the user's side too (the user's priority lists first). Runs the same
+    draft state machine as the interactive route, so both end up in identical results."""
+    from app.services import draft
+
+    return draft.auto_finish(db, player, t, m, strategy)

@@ -9,7 +9,7 @@ from datetime import date, timedelta
 
 from app.engine import simulation
 from app.models import Player
-from app.services import media
+from app.services import economy, media, story
 
 OCCUPATIONS = ("school", "university", "work", "pro")
 # (weekday, weekend) free hours.
@@ -60,13 +60,28 @@ def free_hours(player: Player, d: date) -> float:
             hours = max(hours, 11.0)
         elif _in_exams(d):
             hours = max(1.0, hours - 3)
-    return hours
+    return max(0.0, hours + story.mod_sum(player, "free_hours", d))
+
+
+def forced_rest(player: Player, d: date) -> str | None:
+    """A life event (illness, family trip...) that rules out playing altogether on this day."""
+    if story.mod_sum(player, "free_hours", d) <= -10:
+        active = [m for m in story.mods(player, d) if m.get("free_hours", 0) <= -10]
+        return active[0]["label_en"] if active else "resting"
+    return None
 
 
 def check_hours(player: Player, hours: float, days: int = 1) -> None:
     """Refuse plans that would need more than free time plus a few hours of sleep, on any day."""
+    if hours <= 0:
+        return
+    if story.get(player, "retired"):
+        raise LifeError(409, "this career is over")
     for i in range(days):
         d = player.in_game_date + timedelta(days=i)
+        reason = forced_rest(player, d)
+        if reason:
+            raise LifeError(409, f"you can't play on {d}: {reason}")
         limit = free_hours(player, d) + MAX_SLEEP_TRADE
         if hours > limit + 1e-9:
             raise LifeError(422, f"on {d} you only have {free_hours(player, d):g}h of free time "
@@ -74,6 +89,10 @@ def check_hours(player: Player, hours: float, days: int = 1) -> None:
 
 
 def learning_multiplier(player: Player) -> float:
+    return _age_learning(player) * story.mod_product(player, "learning")
+
+
+def _age_learning(player: Player) -> float:
     a = age(player)
     if a is None:
         return 1.0
@@ -103,19 +122,26 @@ def apply_days(player: Player, start: date, end: date, hours_per_day: float) -> 
     while d < end:
         overtime_total += max(0.0, hours_per_day - free_hours(player, d))
         if d.weekday() == 6:
-            player.money += WEEKLY_INCOME[player.occupation]
+            economy.weekly(player, d)
             player.followers = int(player.followers * 0.995)
         if d.day == 1:
             for limit, amount in SPONSOR_MONTHLY:
                 if player.global_rank and player.global_rank <= limit:
-                    pay = round(amount * media.community_size(d))
-                    player.money += pay
+                    from app.services import integrity
+
+                    pay = round(amount * media.community_size(d) * integrity.sponsor_factor(player)
+                                * story.mod_product(player, "income", d))
+                    economy.earn(player, pay, "sponsor", d)
                     events.append(simulation.Event(d, "SPONSOR", f"Sponsorship deal pays ${pay:,} this month.", {}))
                     break
             if player.followers >= 1000:
                 pay = round(player.followers * 0.02)
-                player.money += pay
+                economy.earn(player, pay, "stream", d)
                 events.append(simulation.Event(d, "SPONSOR", f"Streaming sponsor pays ${pay:,} this month.", {}))
+            from app.services import spending
+
+            events += spending.charge_subscriptions(player, d)
+            events += [simulation.Event(d, "BUDGET", line, {}) for line in economy.monthly(player, d)]
         events += _milestones(player, d)
         d += timedelta(days=1)
     if overtime_total:
@@ -123,6 +149,8 @@ def apply_days(player: Player, start: date, end: date, hours_per_day: float) -> 
         player.form = max(-2.5, player.form - OVERTIME_FORM * overtime_total)
         events.append(simulation.Event(end, "SLEEP_DEBT", f"Stayed up late: {overtime_total:g}h of sleep lost.",
                                        {"hours": overtime_total}))
+    if economy.realistic(player) and player.money < 0 and player.occupation != "pro":
+        player.motivation = max(0.0, player.motivation - 1)  # bills you can't pay weigh on you
     if player.occupation == "pro" and player.money < 0:
         player.motivation = max(0.0, player.motivation - 2)
         if player.money < -1000:

@@ -74,7 +74,7 @@ def test_legends_decline_randoms_and_challenges_expire(client):
     assert client.get(f"/api/players/{pid}/irc", params={"channel": f"DM:{legend.name}"}).json()
     assert client.post(f"/api/players/{pid}/duels", json={"npc_id": legend_id, "best_of": 4}).status_code == 422
 
-    npc_id, _ = _npc_near(pid, (5, 40))
+    npc_id, _ = _npc_near(pid, (24, 48))
     with SessionLocal() as db:
         db.get(Player, pid).global_rank = db.get(Npc, npc_id).rank
         db.commit()

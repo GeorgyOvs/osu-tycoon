@@ -57,6 +57,8 @@ class Player(Base):
     followers: Mapped[int] = mapped_column(Integer, default=0)
     # Tournament badges: [{"name", "tournament_id", "date"}]; count towards BWS seeding.
     badges: Mapped[list] = mapped_column(JSON, default=list)
+    # Bookkeeping shared by the story systems (events, goals, teams): when each last ran, counters.
+    story_state: Mapped[dict] = mapped_column(JSON, default=dict)
 
     # Derived from scores; recomputed on every submission.
     total_pp: Mapped[float] = mapped_column(Float, default=0.0)
@@ -123,6 +125,12 @@ class Score(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
 
     player: Mapped[Player] = relationship(back_populates="scores")
+
+    @property
+    def grade(self) -> str:
+        from app.engine.scoring import stable_grade
+
+        return stable_grade(self.accuracy, self.misses, self.mods, self.map_max_combo or self.max_combo)
 
 
 class BeatmapSet(Base):
@@ -400,6 +408,7 @@ class MapScore(Base):
     misses: Mapped[int] = mapped_column(Integer)
     pp: Mapped[float] = mapped_column(Float, default=0.0)
     set_on: Mapped[date] = mapped_column(Date)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)  # how often this player has played the map (practice)
 
 
 class MapBoard(Base):
@@ -437,6 +446,20 @@ class Duel(Base):
     won: Mapped[bool | None] = mapped_column(nullable=True)
 
 
+class MapBlock(Base):
+    """A mindlock: the player tenses up at one spot of one map (see engine/mindlock.py)."""
+
+    __tablename__ = "map_blocks"
+
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    beatmap_id: Mapped[int] = mapped_column(Integer, primary_key=True)
+    bucket: Mapped[int] = mapped_column(Integer, default=0)  # slice of the 40-slice timeline
+    streak: Mapped[int] = mapped_column(Integer, default=0)  # failures in a row at that spot
+    severity: Mapped[float] = mapped_column(Float, default=0.0)  # 0 = just a bad habit, 1 = locked up
+    last_on: Mapped[date] = mapped_column(Date)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+
+
 class MapFamiliarity(Base):
     """How well the player knows a map: replaying it builds muscle memory, time away fades it."""
 
@@ -469,3 +492,136 @@ class Rival(Base):
     heat: Mapped[float] = mapped_column(Float, default=20.0)  # 0..100: how personal it is
     active: Mapped[bool] = mapped_column(default=True)
     record: Mapped[dict] = mapped_column(JSON, default=dict)  # snipes_for/against, matches_won/lost
+
+
+# --- Story layer: life events, goals, arcs, teams ------------------------------------------------
+
+
+class LifeEvent(Base):
+    """Something that happens to the player. Pending ones wait for a choice (and expire into their default)."""
+
+    __tablename__ = "life_events"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), index=True)
+    key: Mapped[str] = mapped_column(String(48))  # catalog template
+    category: Mapped[str] = mapped_column(String(16), default="life")
+    title: Mapped[str] = mapped_column(String(160))
+    body: Mapped[str] = mapped_column(String(1200), default="")
+    created_on: Mapped[date] = mapped_column(Date, index=True)
+    expires_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="pending")  # pending | resolved | expired
+    options: Mapped[list] = mapped_column(JSON, default=list)  # [{key, label, hint}]
+    choice: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    outcome: Mapped[str] = mapped_column(String(1200), default="")
+    data: Mapped[dict] = mapped_column(JSON, default=dict)  # context for the templates (npc ids, amounts...)
+    # Lasting effect: {"until": iso date, "free_hours": -3, "learning": 0.9, "label": "..."}.
+    modifiers: Mapped[dict] = mapped_column(JSON, default=dict)
+    active_until: Mapped[date | None] = mapped_column(Date, nullable=True, index=True)
+
+
+class StoryArc(Base):
+    """A narrative the career is in the middle of (comeback, breakout, rivalry...); chapters accumulate."""
+
+    __tablename__ = "story_arcs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), index=True)
+    key: Mapped[str] = mapped_column(String(32))
+    title: Mapped[str] = mapped_column(String(160))
+    started_on: Mapped[date] = mapped_column(Date)
+    ended_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="active")  # active | resolved
+    chapters: Mapped[list] = mapped_column(JSON, default=list)  # [{date, text}]
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Goal(Base):
+    __tablename__ = "goals"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), index=True)
+    key: Mapped[str] = mapped_column(String(48))
+    title: Mapped[str] = mapped_column(String(200))
+    description: Mapped[str] = mapped_column(String(600), default="")
+    created_on: Mapped[date] = mapped_column(Date)
+    deadline: Mapped[date | None] = mapped_column(Date, nullable=True)
+    status: Mapped[str] = mapped_column(String(12), default="active")  # active | done | failed
+    progress: Mapped[float] = mapped_column(Float, default=0.0)  # 0..1
+    target: Mapped[dict] = mapped_column(JSON, default=dict)
+    reward: Mapped[dict] = mapped_column(JSON, default=dict)
+    finished_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class Team(Base):
+    """The player's clan or squad. `status`: invited (an offer is pending) | active | left | disbanded."""
+
+    __tablename__ = "teams"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), index=True)
+    name: Mapped[str] = mapped_column(String(48))
+    tag: Mapped[str] = mapped_column(String(8), default="")
+    founded_on: Mapped[date] = mapped_column(Date)
+    status: Mapped[str] = mapped_column(String(12), default="active")
+    chemistry: Mapped[float] = mapped_column(Float, default=40.0)  # 0..100
+    reputation: Mapped[float] = mapped_column(Float, default=10.0)  # 0..100
+    user_role: Mapped[str] = mapped_column(String(16), default="member")
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+    members: Mapped[list["TeamMember"]] = relationship(cascade="all, delete-orphan", order_by="TeamMember.id")
+
+
+class TeamMember(Base):
+    __tablename__ = "team_members"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    team_id: Mapped[int] = mapped_column(ForeignKey("teams.id", ondelete="CASCADE"), index=True)
+    npc_id: Mapped[int] = mapped_column(Integer)
+    role: Mapped[str] = mapped_column(String(16), default="member")  # leader | anchor | speed | accuracy | member
+    joined_on: Mapped[date] = mapped_column(Date)
+    left_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    bond: Mapped[float] = mapped_column(Float, default=30.0)  # 0..100: how much they like the player
+    data: Mapped[dict] = mapped_column(JSON, default=dict)
+
+
+class SessionLog(Base):
+    """A finished play session as shown to the player, kept so the history survives reloads."""
+
+    __tablename__ = "session_logs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), index=True)
+    mode: Mapped[str] = mapped_column(String(8), default="auto")  # auto | manual
+    date: Mapped[date] = mapped_column(Date)
+    payload: Mapped[dict] = mapped_column(JSON)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
+
+
+class ProfileSnapshot(Base):
+    """Rank and pp once per in-game day, for the profile graphs."""
+
+    __tablename__ = "profile_snapshots"
+    __table_args__ = (UniqueConstraint("player_id", "date"),)
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), index=True)
+    date: Mapped[date] = mapped_column(Date, index=True)
+    rank: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    pp: Mapped[float] = mapped_column(Float, default=0.0)
+    accuracy: Mapped[float] = mapped_column(Float, default=0.0)
+    play_count: Mapped[int] = mapped_column(Integer, default=0)
+
+
+class MatchDraft(Base):
+    """An interactive ban/pick draft of the user's tournament match, saved between requests."""
+
+    __tablename__ = "match_drafts"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), index=True)
+    match_id: Mapped[int] = mapped_column(ForeignKey("matches.id", ondelete="CASCADE"), unique=True)
+    state: Mapped[dict] = mapped_column(JSON, default=dict)
+    finished: Mapped[bool] = mapped_column(default=False)
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow, onupdate=_utcnow)

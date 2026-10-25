@@ -58,6 +58,9 @@ ERAS: tuple[PpEra, ...] = (
 )
 
 
+DECAY_GRACE_DAYS = 14  # ppv1: no decay while you keep playing
+
+
 def era_for(on: date) -> PpEra:
     current = ERAS[0]
     for era in ERAS:

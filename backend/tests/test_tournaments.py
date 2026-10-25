@@ -162,3 +162,70 @@ def test_withdrawing_from_a_match(client):
     assert resp.status_code == 200, resp.text
     m = next(x for x in resp.json()["matches"] if x["id"] == pending["id"])
     assert max(m["score_a"], m["score_b"]) == m["first_to"] and min(m["score_a"], m["score_b"]) == 0
+
+
+def test_every_rank_band_has_a_busy_calendar():
+    from app.engine.world_data import TOURNAMENTS
+
+    def count(rank, year):
+        return sum(1 for t in TOURNAMENTS if t.team_size == 1 and t.first_year <= year <= t.last_year
+                   and t.rank_min <= rank <= t.rank_max)
+
+    for year, floor in ((2012, 4), (2016, 7), (2021, 8)):
+        assert count(1, year) >= floor + 1, year   # the very top used to have almost nothing
+        assert count(300, year) >= floor, year
+        assert count(750, year) >= floor, year     # ranks 501-999 sat in a gap between opens and majors
+        assert count(3_000, year) >= floor, year
+        assert count(40_000, year) >= 3, year
+
+
+def test_existing_careers_get_new_calendar_entries(client):
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Tournament
+    from app.services import story, world_service
+    from app.models import Player
+
+    pid = client.post("/api/players", json=dict(name="Vet", country="RU", start_date="2016-01-01", seed=3, age=18)).json()["id"]
+    client.get(f"/api/players/{pid}/tournaments")
+    with SessionLocal() as db:
+        before = db.query(Tournament).filter_by(player_id=pid).count()
+        for t in db.scalars(select(Tournament).where(Tournament.player_id == pid, Tournament.template == "champions")):
+            db.delete(t)
+        player = db.get(Player, pid)
+        story.put(player, "tournament_templates", 0)
+        db.commit()
+        world_service.ensure_world(db, player)
+        db.commit()
+        assert db.query(Tournament).filter_by(player_id=pid).count() == before
+
+
+def test_duplicate_tournaments_are_removed_keeping_the_played_one(client):
+    from sqlalchemy import select
+
+    from app.db import SessionLocal
+    from app.models import Tournament
+    from app.services import tournaments as T
+
+    pid = client.post("/api/players", json=dict(name="Dup", country="RU", start_date="2016-01-01", seed=3, age=18)).json()["id"]
+    client.get(f"/api/players/{pid}/tournaments")
+    with SessionLocal() as db:
+        from sqlalchemy import text
+
+        db.execute(text("DROP INDEX IF EXISTS ux_tournament_slot"))  # old databases had duplicates before the index existed
+        original = db.scalars(select(Tournament).where(Tournament.player_id == pid, Tournament.template == "champions")).first()
+        copy = Tournament(**{c.name: getattr(original, c.name) for c in Tournament.__table__.columns if c.name != "id"})
+        copy.status = "finished"  # the stray copy even got further than the original
+        db.add(copy)
+        db.flush()
+        assert db.query(Tournament).filter_by(player_id=pid, template="champions", start_date=original.start_date).count() == 2
+        original.user_registered = True
+        assert T.dedupe(db) == 1
+        left = db.scalars(select(Tournament).where(Tournament.player_id == pid, Tournament.template == "champions",
+                                                   Tournament.start_date == original.start_date)).all()
+        assert len(left) == 1
+        # creating the same slot again is a no-op
+        again = Tournament(**{c.name: getattr(left[0], c.name) for c in Tournament.__table__.columns if c.name != "id"})
+        assert T._add_once(db, again) is False
+        db.execute(text("CREATE UNIQUE INDEX IF NOT EXISTS ux_tournament_slot ON tournaments(player_id, template, start_date)"))

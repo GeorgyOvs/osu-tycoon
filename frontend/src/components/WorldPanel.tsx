@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
 import { fmt, socialApi, worldApi, type Leaderboard, type NewsItem, type NpcProfile } from '../api'
+import { beatmapUrl } from '../links'
 import { t, tx } from '../i18n'
+import { openNpc } from '../npcBus'
 import { DuelChallenger } from './DuelPanel'
 import { MapLeaderboard } from './MapLeaderboard'
 
@@ -57,9 +59,14 @@ function NpcCard({ playerId, npcId, onClose, onChanged }: { playerId: number; np
           <b>{npc.name}</b> <span className="text-muted">[{npc.country}]</span>
           {npc.kind === 'legend' && <span className="ml-2 rounded bg-amber-500/20 px-1.5 text-xs text-amber-300">{t('legend')}</span>}
         </div>
-        <button onClick={onClose} className="text-muted hover:text-white">
-          ✕
-        </button>
+        <span className="flex gap-2">
+          <button onClick={() => openNpc({ id: npc.id })} className="rounded-full bg-panel-light px-2 text-xs hover:bg-osu-pink">
+            {t('Full profile')}
+          </button>
+          <button onClick={onClose} className="text-muted hover:text-white">
+            ✕
+          </button>
+        </span>
       </div>
       {npc.archetype && <p className="text-xs text-muted">{t('Playstyle')}: <b className="text-white">{t(npc.archetype)}</b></p>}
       {npc.aliases.length > 0 && <p className="text-xs text-muted">{t('aka')} {npc.aliases.join(', ')}</p>}
@@ -110,7 +117,7 @@ function NpcCard({ playerId, npcId, onClose, onChanged }: { playerId: number; np
           try {
             await socialApi.dm(playerId, npc.name, message.trim())
             setMessage('')
-            setSent(t('Sent. The reply shows up in the IRC window under DM:{name}.', { name: npc.name }))
+            setSent(t('Sent. The reply shows up in the Chats tab under DM:{name}.', { name: npc.name }))
           } catch (err) {
             setSent(tx((err as Error).message))
           }
@@ -239,7 +246,9 @@ export function WorldPanel({ playerId, dateKey, country, onChanged }: WorldProps
         </ul>
         {newsMap !== null && <div className="space-y-2 rounded bg-bg p-3">
           <button className="text-xs text-muted" onClick={() => setNewsMap(null)}>{t('Close')}</button>
-          <a className="ml-3 text-xs text-osu-pink" href={`https://osu.ppy.sh/beatmaps/${newsMap}`} target="_blank" rel="noreferrer">osu! ↗</a>
+          {beatmapUrl(newsMap) && (
+            <a className="ml-3 text-xs text-osu-pink" href={beatmapUrl(newsMap) ?? undefined} target="_blank" rel="noreferrer">osu! ↗</a>
+          )}
           <MapLeaderboard playerId={playerId} beatmapId={newsMap} dateKey={dateKey} />
         </div>}
       </section>

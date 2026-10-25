@@ -4,12 +4,46 @@
  * Player names, map titles, tournament names and chat stay as they are.
  */
 import { DRILL_LABELS, PRESET_LABELS } from './i18n.keys'
+import { RU_INTEGRITY, RU_INTEGRITY_PATTERNS } from './i18n.ru.integrity'
+import { RU_MENTORS, RU_MENTORS_PATTERNS } from './i18n.ru.mentors'
+import { RU_LEGACY, RU_LEGACY_PATTERNS } from './i18n.ru.legacy'
+import { RU_REPLAY, RU_REPLAY_PATTERNS } from './i18n.ru.replay'
+import { RU_STORY, RU_STORY_PATTERNS } from './i18n.ru.story'
+import { RU_SEARCH, RU_SEARCH_PATTERNS } from './i18n.ru.search'
+import { RU_NOTIFY, RU_NOTIFY_PATTERNS } from './i18n.ru.notify'
+import { RU_DRAFT, RU_DRAFT_PATTERNS } from './i18n.ru.draft'
+import { RU_HINTS, RU_HINTS_PATTERNS } from './i18n.ru.hints'
+import { RU_SPENDING, RU_SPENDING_PATTERNS } from './i18n.ru.spending'
+import { RU_TEAM, RU_TEAM_PATTERNS } from './i18n.ru.team'
 
 export const RU: Record<string, string> = {
+  ...RU_STORY,
+  ...RU_SEARCH,
+  ...RU_NOTIFY,
+  ...RU_HINTS,
+  ...RU_SPENDING,
+  ...RU_DRAFT,
+  ...RU_LEGACY,
+  ...RU_INTEGRITY,
+  ...RU_MENTORS,
+  ...RU_TEAM,
+  ...RU_REPLAY,
   'Announced records (pp at the time of the play)': 'Объявленные рекорды (pp на момент скора)',
   'Open map leaderboard': 'Открыть лидерборд карты',
   'Record withdrawn: the old 1000pp announcement had no verified beatmap score.': 'Рекорд отозван: старое сообщение о 1000pp не было подтверждено скором на карте.',
   'Character build': 'Таланты и слабости',
+  'Starting level': 'Стартовый уровень',
+  'Auto sessions': 'Авто-сессии',
+  'Place on the map leaderboard with this play': 'Место на лидерборде карты с этим плеем',
+  'Show the leaderboard': 'Показать лидерборд',
+  'Hide the leaderboard': 'Скрыть лидерборд',
+  Discussions: 'Обсуждения',
+  'Pick maps yourself': 'Выбрать карты самому',
+  'Show the leaderboard of this map': 'Показать таблицу скоров этой карты',
+  'Replays never lower your total: only your best play on each map counts.': 'Перепрохождения не снижают суммарные pp: учитывается только лучший плей на каждой карте.',
+  'Not a new best · best {pp}': 'Не рекорд · лучший {pp}',
+  Newcomer: 'Новичок',
+  'from age {n}': 'с {n} лет',
   'Character preset': 'Пресет персонажа',
   'Random talents and weaknesses': 'Случайные таланты и слабости (по умолчанию)',
   'Custom build': 'Свой персонаж',
@@ -181,6 +215,17 @@ export const RU: Record<string, string> = {
   'Ranked Pack Grind': 'Гринд ранкнутых паков',
   'Play through full beatmap packs (DJ POP, SiFa, James). The only practice there is in the early days.':
     'Прохождение целых бит-паков (DJ POP, SiFa, James). В ранние годы другой практики просто нет.',
+  'Ranked Stream Maps': 'Стрим-карты из ранкеда',
+  'Stream-heavy ranked maps. Before dedicated practice maps exist this is the only way to build stamina and burst; once they do it is a slower, gentler alternative.':
+    'Ранкнутые карты со стримами. Пока нет практических карт, это единственный способ растить выносливость и бёрст; позже — более медленная и мягкая альтернатива.',
+  'Ranked Jump Maps': 'Джамп-карты из ранкеда',
+  'Big-spacing ranked maps. Slower than a dedicated jump farm, but it is all there is early on.':
+    'Ранкнутые карты с большими прыжками. Медленнее выделенного джамп-фарма, но в ранние годы другого нет.',
+  'Ranked Slider Maps': 'Слайдерные карты из ранкеда',
+  'Ranked maps with slider velocity changes and awkward geometry.': 'Ранкнутые карты со сменами скорости слайдеров и неудобной геометрией.',
+  'Stretching & Breaks': 'Растяжка и перерывы',
+  'Stretch, shake the hands out, rest the eyes. Not glamorous, but it keeps your wrists alive.':
+    'Растянуться, размять кисти, дать отдых глазам. Скучно, но запястья целее.',
   'Hidden Grind': 'Гринд с Hidden',
   'Replay favourite maps with HD until fading circles feel natural.': 'Любимые карты с HD, пока исчезающие круги не станут привычными.',
   'HardRock Practice': 'Практика HardRock',
@@ -261,6 +306,12 @@ export const RU: Record<string, string> = {
   'Small circles, strict timing.': 'Маленькие круги, строгий тайминг.',
   'DT session': 'Сессия с DT',
   'Speed it up: DT on maps you know.': 'Ускоряемся: DT на знакомых картах.',
+  'HDHR session': 'Сессия с HDHR',
+  'Hidden and HardRock together: tiny circles that vanish.': 'Hidden и HardRock вместе: маленькие круги, которые исчезают.',
+  'HDDT session': 'Сессия с HDDT',
+  'Hidden and DT together: fast maps you must read on the fly.': 'Hidden и DT вместе: быстрые карты, которые нужно читать на лету.',
+  'HDHRDT session': 'Сессия с HDHRDT',
+  'All three at once. Brutal, and the best practice for mod-heavy tournament slots.': 'Все три мода сразу. Жёстко, зато лучшая практика для модовых слотов турниров.',
   'Newly ranked': 'Свежий ранк',
   'Whatever got ranked in the last couple of months.': 'Всё, что ранкнули за последние пару месяцев.',
   'pool practice': 'тренировка маппула',
@@ -436,7 +487,7 @@ export const RU: Record<string, string> = {
   hot: 'горячая',
   cold: 'холодная',
   normal: 'обычная',
-  'Sent. The reply shows up in the IRC window under DM:{name}.': 'Отправлено. Ответ появится в окне IRC во вкладке DM:{name}.',
+  'Sent. The reply shows up in the Chats tab under DM:{name}.': 'Отправлено. Ответ появится во вкладке «Чаты», диалог DM:{name}.',
   'Message {name}…': 'Написать {name}…',
   DM: 'ЛС',
   '{c} rankings': 'Рейтинг {c}',
@@ -624,6 +675,17 @@ const preset = (key: string) => L(PRESET_LABELS[key] ?? key)
 type Out = string | ((...groups: string[]) => string)
 
 export const RU_PATTERNS: [RegExp, Out][] = [
+  ...RU_STORY_PATTERNS,
+  ...RU_SEARCH_PATTERNS,
+  ...RU_NOTIFY_PATTERNS,
+  ...RU_HINTS_PATTERNS,
+  ...RU_SPENDING_PATTERNS,
+  ...RU_DRAFT_PATTERNS,
+  ...RU_LEGACY_PATTERNS,
+  ...RU_INTEGRITY_PATTERNS,
+  ...RU_MENTORS_PATTERNS,
+  ...RU_TEAM_PATTERNS,
+  ...RU_REPLAY_PATTERNS,
   // simulation & life events
   [/^(.+) reached (\d+)\.$/, (g, v) => `${L(g)}: достигнут уровень ${v}.`],
   [/^Something clicked: (.+) \+([\d.]+)\.$/, (s, j) => `Что-то щёлкнуло: ${L(s)} +${j}.`],

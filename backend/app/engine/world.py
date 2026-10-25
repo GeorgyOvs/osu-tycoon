@@ -93,8 +93,20 @@ def overall_for_pp(pp: float, on: date) -> float:
     return era_top_overall(on) + math.log(max(pp, 1.0) / top_pp(on)) / PP_PER_POINT
 
 
+# Calibration (tools/calibrate_skill.py, real careers): a player's note-by-note play earns about 20% more pp than an
+# NPC of the same number on this curve, i.e. ~4 points. The NPC curve is anchored to real rank/pp history, so instead
+# of weakening the player, every NPC's *playing* skill is shown and simulated 4 points below the curve value: a rank-76
+# NPC and a rank-76 player now carry the same numbers. pp for NPCs is unchanged (pp_overall adds the offset back).
+SKILL_OFFSET = 4.0
+
+
+def display_overall(curve_overall: float) -> float:
+    """An NPC's overall on the player's scale."""
+    return A.clamp(curve_overall - SKILL_OFFSET)
+
+
 def composites(overall: float, style: dict[str, float]) -> dict[str, float]:
-    return {g: A.clamp(overall * (1 + STYLE_SPREAD * style.get(g, 0.0))) for g in GROUP_KEYS}
+    return {g: A.clamp(display_overall(overall) * (1 + STYLE_SPREAD * style.get(g, 0.0))) for g in GROUP_KEYS}
 
 
 def pp_overall(comps: dict[str, float], on: date) -> float:
@@ -103,7 +115,7 @@ def pp_overall(comps: dict[str, float], on: date) -> float:
     weights = PP_META[pp_history.era_for(on).key]
     mean = sum(comps[g] * w for g, w in weights.items())
     peak = max(comps[g] for g in weights)
-    return (mean + SPECIALIST_BONUS * max(0.0, peak - mean)) / PEAK_NORM
+    return (mean + SPECIALIST_BONUS * max(0.0, peak - mean)) / PEAK_NORM + SKILL_OFFSET / PEAK_NORM
 
 
 TOURNAMENT_WEIGHTS = {

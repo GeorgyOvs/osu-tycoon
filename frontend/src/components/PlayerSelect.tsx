@@ -15,6 +15,9 @@ export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
   const [preset, setPreset] = useState('random')
   const [perks, setPerks] = useState<string[]>([])
   const [unbalanced, setUnbalanced] = useState(false)
+  const [scenario, setScenario] = useState('newcomer')
+  const [hardcore, setHardcore] = useState(false)
+  const [realisticEconomy, setRealisticEconomy] = useState(false)
   const spent = perks.reduce((sum, key) => sum + (options?.perks[key]?.cost ?? 0), 0)
   const overBudget = !unbalanced && spent > (options?.budget ?? 4)
 
@@ -30,7 +33,7 @@ export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
     try {
       if (overBudget) return
       const p = await api.createPlayer({ name, country, start_date: startDate, age, gender,
-        preset, ...(preset !== 'random' ? { perks } : {}), unbalanced })
+        preset, ...(preset !== 'random' ? { perks } : {}), unbalanced, scenario, hardcore, realistic_economy: realisticEconomy })
       onSelect(p.id)
     } catch (err) {
       setError((err as Error).message)
@@ -38,8 +41,17 @@ export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
   }
 
   const remove = async (id: number) => {
-    if (!confirm(t('Delete this career? This cannot be undone.'))) return
-    await api.deletePlayer(id)
+    const target = players.find((p) => p.id === id)
+    let typed: string | undefined
+    if (target?.character_build?.hardcore) {
+      typed = prompt(t('Delete hardcore career: type its name to confirm')) ?? undefined
+      if (!typed) return
+    } else if (!confirm(t('Delete this career? This cannot be undone.'))) return
+    try {
+      await api.deletePlayer(id, typed)
+    } catch (err) {
+      setError((err as Error).message)
+    }
     void reload()
   }
 
@@ -132,6 +144,42 @@ export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
             <option value="nonbinary">{t('Non-binary (they/them)')}</option>
           </select>
         </label>
+        <fieldset className="space-y-2 rounded bg-bg p-3">
+          <legend className="text-sm">{t('Starting level')}</legend>
+          <select aria-label={t('Starting level')} value={scenario} disabled={!options?.scenarios}
+            onChange={(e) => {
+              const key = e.target.value
+              setScenario(key)
+              const min = options?.scenarios?.[key]?.min_age ?? 7
+              if (age < min) setAge(min)
+            }} className="w-full rounded bg-panel p-2">
+            {Object.entries(options?.scenarios ?? { newcomer: { label: t('Newcomer'), description: '', min_age: 7 } }).map(([key, s]) => (
+              <option key={key} value={key}>{s.label}</option>
+            ))}
+          </select>
+          {options?.scenarios?.[scenario] && (
+            <p className="text-xs text-muted">
+              {options.scenarios[scenario].description}
+              {options.scenarios[scenario].min_age > 7 && ` · ${t('from age {n}', { n: options.scenarios[scenario].min_age })}`}
+            </p>
+          )}
+        </fieldset>
+        <fieldset className="space-y-2 rounded bg-bg p-3">
+          <label className="flex gap-2 text-sm">
+            <input type="checkbox" checked={hardcore} onChange={(e) => setHardcore(e.target.checked)} />
+            {t('Hardcore (no second chances)')}
+          </label>
+          <p className="text-xs text-muted">
+            {t('Harsher injuries, tougher default outcomes, deleting needs a typed confirmation. Months in debt or a career-ending injury end the run.')}
+          </p>
+          <label className="flex gap-2 text-sm">
+            <input type="checkbox" checked={realisticEconomy} onChange={(e) => setRealisticEconomy(e.target.checked)} />
+            {t('Realistic economy (living costs, taxes, loans)')}
+          </label>
+          <p className="text-xs text-muted">
+            {t('Rent, tuition, taxes on winnings, interest on debt and loans. Off keeps the simple balance.')}
+          </p>
+        </fieldset>
         <fieldset className="space-y-3 rounded bg-bg p-3">
           <legend className="text-sm">{t('Character build')}</legend>
           <select aria-label={t('Character preset')} value={preset} disabled={!options}

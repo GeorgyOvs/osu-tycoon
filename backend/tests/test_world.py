@@ -152,7 +152,7 @@ def test_world_moves_while_you_rest(client):
         events += client.post(f"/api/players/{pid}/rest", json={"days": 30}).json()["events"]
     world_events = [e for e in events if e["type"].startswith("WORLD_")]
     assert any(e["type"] == "WORLD_TOURNAMENT_WINNER" for e in world_events)
-    news = client.get(f"/api/players/{pid}/news").json()
+    news = client.get(f"/api/players/{pid}/news", params={"limit": 200}).json()
     assert len(news) >= len(world_events) > 0
 
     listing = client.get(f"/api/players/{pid}/tournaments").json()
@@ -221,3 +221,19 @@ def test_one_person_is_one_legend():
     assert "chocomint" in world.LEGENDS_BY_NAME["Cookiezi"].aliases
     generated = {c.name for c in world.generate_procedural(1, 400)}
     assert not generated & world.RESERVED_NAMES
+
+
+def test_npcs_and_players_share_one_scale():
+    from datetime import date
+
+    from app.engine import world
+
+    on = date(2012, 10, 5)
+    # an NPC's playing skill is shown 4 points below its curve value, but its pp (rank) is unchanged
+    npc_curve = 84.9
+    comps = world.composites(npc_curve, {})
+    assert abs(sum(comps.values()) / len(comps) - (npc_curve - world.SKILL_OFFSET)) < 1e-6
+    before = world.pp_for_overall(npc_curve / world.PEAK_NORM, on)  # what refresh_pp produced before the shift
+    after = world.pp_for_overall(world.pp_overall(comps, on), on)
+    assert abs(after / before - 1) < 0.03
+    assert world.display_overall(npc_curve) == npc_curve - world.SKILL_OFFSET

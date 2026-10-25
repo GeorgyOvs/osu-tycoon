@@ -9,7 +9,7 @@ import math
 import random
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.engine import world
@@ -51,6 +51,19 @@ IRC_LINES = {
     "snipe": ["{player} just sniped {sniped} on {map_short} o.o", "rip {sniped}", "SNIPED"],
     "rework": ["did you see the pp changes", "my rank went down 2k", "pp rework lol"],
 }
+
+COMMENTS["scorepost"] += ["wait is that {player}? they were nowhere last month", "{pp}pp is a lot on {map_short}",
+                          "my hands hurt just watching this", "legit question: how long did this take", "{player} cooking again",
+                          "this map has no business being that fun", "that acc though", "congrats, now do it on stream"]
+COMMENTS["tournament"] += ["{winner} deserved it", "{loser} choked the last map", "nobody expected that bracket",
+                           "the commentary was better than the match", "i called {winner} in my bracket", "mappool diff"]
+COMMENTS["news"] += ["interesting times", "the scene is changing", "i'll believe it when i see it", "every week something new",
+                     "can't wait to see what happens next", "so what now?"]
+COMMENTS["milestone"] += ["{player} is moving fast", "big grind, big reward", "remember when they were unranked?"]
+IRC_LINES["scorepost"] += ["{player} again?", "{pp}pp lol", "anyone seen {player}'s replay", "ok that was clean"]
+IRC_LINES["tournament"] += ["{winner} was on fire", "poor {loser}", "bo{score} was nuts", "who is next round"]
+IRC_LINES["news"] += ["ok that's big", "{headline} lol", "didn't see that coming"]
+IRC_LINES["milestone"] += ["{player} is flying", "{rank_label}!! gz", "o7 {player}"]
 
 
 def board_for(on: date) -> str:
@@ -220,6 +233,46 @@ def score_submission(db: Session, player: Player, score, map_max_combo: int, fc_
                 base_upvotes=10 * math.exp(6 * min(significance, 1.5)) * (1.3 if not score.misses else 1.0),
                 tone=tone, fmt=fmt,
                 reactions=_reactions(db, player, rng, 1, f"Reacting to {player.name}'s {round(score.pp)}pp play."))
+
+
+NPC_POST_MIN_SIGNIFICANCE = 0.3
+NPC_POSTS_PER_WEEK = 3
+
+
+def npc_scorepost(db: Session, player: Player, npc, score, beatmap, value: float, rng: random.Random,
+                  user_best_pp: float = 0.0) -> StEvent | None:
+    """A scorepost for a strong play by a generated player, so the forum isn't only about the user.
+    Only plays the era's community would care about, or ones that rival the user's own best, get a thread."""
+    from app.models import MapScore
+    significance = value / era_top_play_pp(score.set_on)
+    rivals_user = user_best_pp > 0 and value >= user_best_pp * 0.95
+    if significance < NPC_POST_MIN_SIGNIFICANCE and not (rivals_user and significance >= 0.15):
+        return None
+    chance = min(0.85, max(0.0, (significance - 0.25) / 0.6)) + (0.3 if rivals_user else 0.0)
+    if rng.random() > chance:
+        return None
+    previous = db.scalar(select(func.max(MapScore.pp)).where(MapScore.player_id == player.id, MapScore.npc_id == npc.id,
+                                                              MapScore.id != score.id)) or 0.0
+    tag = "Their new top play!" if value > previous else "Quick farm session"
+    mods = f" +{score.mods}" if score.mods else ""
+    fc = "FC" if score.misses == 0 else f"{score.misses}xMiss"
+    map_title = f"{beatmap.beatmapset.artist} - {beatmap.beatmapset.title} [{beatmap.version}]"
+    max_combo = beatmap.max_combo or score.max_combo
+    title = (f"{npc.name} | {map_title}{mods} ({score.accuracy:.2f}%) {score.max_combo}/{max_combo}x {fc} | "
+             f"{round(value)}pp | {tag}")
+    data = {"score": {"player": npc.name, "beatmap_id": beatmap.id, "beatmapset_id": beatmap.beatmapset_id,
+                      "title": f"{beatmap.beatmapset.artist} - {beatmap.beatmapset.title}", "difficulty": beatmap.version,
+                      "mods": score.mods or "Nomod", "accuracy": round(score.accuracy, 2), "max_combo": score.max_combo,
+                      "map_max_combo": max_combo, "misses": score.misses, "pp_earned": round(value, 2),
+                      "is_new_top_play": value > previous, "better_than_the_user": rivals_user}}
+    fmt = {"player": npc.name, "pp": round(value), "map_short": _short(beatmap.beatmapset.title), "acc": f"{score.accuracy:.2f}",
+           "misses": score.misses, "fc_pp": "?", "mods": score.mods or "NM"}
+    tone = "hype and disbelief" if significance > 0.8 else "impressed" if significance > 0.45 else "casual"
+    return emit(db, player, "NPC_SCOREPOST", data, kind="scorepost", title=title, flair="Gameplay",
+                body=f"https://osu.ppy.sh/beatmaps/{beatmap.id}",
+                base_upvotes=10 * math.exp(6 * min(significance, 1.5)) * (1.3 if not score.misses else 1.0),
+                tone=tone, fmt=fmt, event_date=score.set_on,
+                reactions=_reactions(db, player, rng, 1, f"Reacting to {npc.name}'s own {round(value)}pp play.", [npc.id]))
 
 
 TIER_UPVOTES = {"community6": 40, "community": 80, "open": 300, "major": 1500, "owc": 3000}

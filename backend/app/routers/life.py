@@ -4,7 +4,7 @@ from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.engine import gear
+from app.engine import gear, world
 from app.models import Player
 from app.routers.players import get_player_or_404
 from app.models import Npc
@@ -95,6 +95,6 @@ def list_rivals(player_id: int, db: Session = Depends(get_db)) -> list[RivalOut]
     for r in rivals.ensure_rivals(db, player):
         npc = db.get(Npc, r.npc_id)
         out.append(RivalOut(npc_id=npc.id, name=npc.name, country=npc.country, kind=npc.kind, rank=npc.rank,
-                            overall=npc.overall, heat=round(r.heat, 1), since=r.since, record=r.record))
+                            overall=world.display_overall(npc.overall), heat=round(r.heat, 1), since=r.since, record=r.record))
     db.commit()
     return out

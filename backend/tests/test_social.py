@@ -171,7 +171,8 @@ def test_dms_reach_sillytavern_and_replies_land_in_the_channel(client):
     pid = _career(client)["id"]
     resp = client.post(f"/api/players/{pid}/dm", json={"to": "Cookiezi", "text": "hi, big fan"})
     assert resp.status_code == 200, resp.text
-    assert resp.json()[-1]["content"] == "hi, big fan"
+    assert resp.json()[0]["content"] == "hi, big fan"  # without a connected LLM a short canned answer follows
+    assert resp.json()[-1]["source"] == "procedural"
     assert client.post(f"/api/players/{pid}/dm", json={"to": "nobody_here", "text": "x"}).status_code == 404
 
     event = next(e for e in client.get(f"/api/st/careers/{pid}/events").json() if e["type"] == "DM_REPLY")
@@ -182,4 +183,55 @@ def test_dms_reach_sillytavern_and_replies_land_in_the_channel(client):
     client.post(f"/api/st/careers/{pid}/irc", json={"channel": "DM:Cookiezi",
                                                     "lines": [{"author": "Cookiezi", "content": "thanks :)"}]})
     lines = client.get(f"/api/players/{pid}/irc", params={"channel": "DM:Cookiezi"}).json()
-    assert [l["content"] for l in lines][-2:] == ["hi, big fan", "thanks :)"]
+    contents = [l["content"] for l in lines]
+    assert "hi, big fan" in contents and contents[-1] == "thanks :)"
+
+
+def test_messenger_summary_and_say(client):
+    pid = client.post("/api/players", json=dict(name="Chatty", country="RU", start_date="2014-03-01", seed=3, age=17)).json()["id"]
+    client.post(f"/api/players/{pid}/rest", json={"days": 10, "physio": False})
+    summary = client.get(f"/api/players/{pid}/irc/summary").json()
+    assert {c["channel"] for c in summary} >= {"#osu", "#russian"}
+    r = client.post(f"/api/players/{pid}/irc/say", json={"channel": "#osu", "text": "hi all"})
+    assert r.status_code == 200 and r.json()["source"] == "user"
+    lines = client.get(f"/api/players/{pid}/irc", params={"channel": "#osu"}).json()
+    mine = next(i for i, l in enumerate(lines) if l["content"] == "hi all")
+    assert lines[mine + 1:] and lines[mine + 1]["source"] == "procedural"  # somebody answers
+    assert client.post(f"/api/players/{pid}/irc/say", json={"channel": "DM:x", "text": "hi"}).status_code == 422
+    assert client.post(f"/api/players/{pid}/irc/say", json={"channel": "#nowhere", "text": "hi"}).status_code == 404
+
+
+def test_replies_go_to_the_llm_when_it_is_connected_and_chat_nudges_vary(client):
+    pid = client.post("/api/players", json=dict(name="Chatty", country="RU", start_date="2014-03-01", seed=3, age=17)).json()["id"]
+    client.get(f"/api/st/careers/{pid}/events")  # SillyTavern polls: it is now considered connected
+    client.post(f"/api/players/{pid}/irc/say", json={"channel": "#osu", "text": "anyone up for a 1v1?"})
+    events = client.get(f"/api/st/careers/{pid}/events").json()
+    reply = next(e for e in events if e["type"] == "CHAT_REPLY")
+    assert "anyone up for a 1v1?" in reply["prompts"]["irc"] and reply["channel"] == "#osu"
+    lines = client.get(f"/api/players/{pid}/irc", params={"channel": "#osu"}).json()
+    assert [l["source"] for l in lines] == ["user"]  # no canned answer next to the LLM's
+
+    first = client.post(f"/api/players/{pid}/chatter/nudge").json()
+    assert first["new_lines"] >= 1
+    assert client.post(f"/api/players/{pid}/chatter/nudge").json()["new_lines"] == 0  # throttled in real time
+
+
+def test_ambient_chatter_is_mostly_not_about_the_player(client):
+    pid = client.post("/api/players", json=dict(name="Chatty", country="RU", start_date="2014-03-01", seed=11, age=17)).json()["id"]
+    for _ in range(14):
+        client.post(f"/api/players/{pid}/rest", json={"days": 3, "physio": False})
+    out, after = [], 0
+    while True:
+        page = client.get(f"/api/st/careers/{pid}/events", params={"limit": 50, "after": after}).json()
+        if not page:
+            break
+        out += page
+        after = page[-1]["id"]
+    ambient = [e for e in out if e["type"] == "AMBIENT_CHATTER"]
+    assert ambient
+    with_player = [e for e in ambient if "player" in e["payload"]["data"]]
+    assert len(with_player) <= max(1, len(ambient) // 2)
+    assert {e["payload"]["data"]["mode"] for e in ambient} <= {"topic", "news", "spotlight", "user"}
+    for e in ambient:
+        if "player" not in e["payload"]["data"]:
+            assert "NOT about the player" in e["prompts"]["irc"]

@@ -11,6 +11,8 @@ from app.engine import world
 from app.models import Match, Npc, Player, Tournament, TournamentEntry
 from app.routers.players import get_player_or_404
 from app.schemas import (
+    DraftActIn,
+    DraftOut,
     EntryOut,
     LeaderboardOut,
     LeaderboardRowOut,
@@ -80,7 +82,7 @@ def npc(player_id: int, npc_id: int, db: Session = Depends(get_db)) -> NpcOut:
     development = dict(n.development or {})
     rival_npc = db.get(Npc, story.get("rival_id")) if story.get("rival_id") else None
     return NpcOut(
-        id=n.id, name=n.name, country=n.country, kind=n.kind, status=n.status, overall=n.overall,
+        id=n.id, name=n.name, country=n.country, kind=n.kind, status=n.status, overall=world.display_overall(n.overall),
         composites=comps, form=n.form, pp=n.pp, rank=n.rank,
         best_rank=n.best_rank, titles=n.titles, away_until=n.away_until, note=legend.note if legend else "",
         aliases=list(legend.aliases) if legend else [], archetype=world.archetype(n.style),
@@ -249,3 +251,51 @@ def play_match(
     media.after_action(db, player, rank_before, news=news)
     db.commit()
     return _detail(player, t)
+
+
+# --- interactive ban/pick draft ---------------------------------------------------------------------
+
+
+def _draft_call(db: Session, player_id: int, tournament_id: int, match_id: int, fn) -> DraftOut:
+    from app.services import draft
+
+    player = _player_with_world(db, player_id)
+    t = _tournament(db, player, tournament_id)
+    m = next((x for x in t.matches if x.id == match_id), None)
+    if m is None:
+        raise HTTPException(404, "match not found")
+    rank_before = player.global_rank
+    try:
+        result = fn(draft, player, t, m)
+    except tournaments.TournamentError as e:
+        db.rollback()
+        raise HTTPException(e.status_code, str(e)) from e
+    view, news = result if isinstance(result, tuple) else (result, [])
+    if news:
+        media.after_action(db, player, rank_before, news=news)
+    db.commit()
+    return DraftOut(**view)
+
+
+@router.get("/tournaments/{tournament_id}/matches/{match_id}/draft", response_model=DraftOut)
+def get_draft(player_id: int, tournament_id: int, match_id: int, db: Session = Depends(get_db)) -> DraftOut:
+    """Open (or resume) the live ban/pick room of your next match; the opponent's turns are already played."""
+    return _draft_call(db, player_id, tournament_id, match_id, lambda d, p, t, m: d.start_or_get(db, p, t, m))
+
+
+@router.post("/tournaments/{tournament_id}/matches/{match_id}/draft/act", response_model=DraftOut)
+def draft_act(player_id: int, tournament_id: int, match_id: int, body: DraftActIn,
+              db: Session = Depends(get_db)) -> DraftOut:
+    return _draft_call(db, player_id, tournament_id, match_id, lambda d, p, t, m: d.act(db, p, t, m, body.slot))
+
+
+@router.post("/tournaments/{tournament_id}/matches/{match_id}/draft/auto", response_model=DraftOut)
+def draft_auto(player_id: int, tournament_id: int, match_id: int, body: MatchStrategyIn | None = None,
+               db: Session = Depends(get_db)) -> DraftOut:
+    strategy = {"bans": body.bans, "picks": body.picks} if body and (body.bans or body.picks) else None
+    return _draft_call(db, player_id, tournament_id, match_id, lambda d, p, t, m: d.auto(db, p, t, m, strategy))
+
+
+@router.post("/tournaments/{tournament_id}/matches/{match_id}/draft/warmup", response_model=DraftOut)
+def draft_warmup(player_id: int, tournament_id: int, match_id: int, db: Session = Depends(get_db)) -> DraftOut:
+    return _draft_call(db, player_id, tournament_id, match_id, lambda d, p, t, m: d.warmup(db, p, t, m))

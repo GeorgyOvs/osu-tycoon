@@ -1,4 +1,5 @@
 import { useEffect, useState } from 'react'
+import { usePersisted } from '../usePersisted'
 import { presetApi, type SessionPreset, type SessionResult } from '../api'
 import { t } from '../i18n'
 
@@ -6,15 +7,15 @@ interface Props {
   playerId: number
   dateKey: string
   disabledReason: string | null
-  onPlayed: (result: SessionResult) => void
+  onPlayed: (result: SessionResult, replay: { preset: string; hours: number; stream: boolean }) => void
 }
 
 /** A day of playing without hand-picking maps: the engine chooses around your level. */
 export function QuickSession({ playerId, dateKey, disabledReason, onPlayed }: Props) {
   const [presets, setPresets] = useState<SessionPreset[]>([])
-  const [selected, setSelected] = useState('farm')
-  const [hours, setHours] = useState(2)
-  const [stream, setStream] = useState(false)
+  const [selected, setSelected] = usePersisted('session.preset', 'farm')
+  const [hours, setHours] = usePersisted('session.hours', 2)
+  const [stream, setStream] = usePersisted('session.stream', false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
@@ -28,7 +29,7 @@ export function QuickSession({ playerId, dateKey, disabledReason, onPlayed }: Pr
     setBusy(true)
     setError(null)
     try {
-      onPlayed(await presetApi.auto(playerId, selected, hours, stream))
+      onPlayed(await presetApi.auto(playerId, selected, hours, stream), { preset: selected, hours, stream })
     } catch (e) {
       setError((e as Error).message)
     } finally {

@@ -2,6 +2,8 @@ import { useEffect, useState } from 'react'
 import { duelApi, fmt, starColor, type Duel, type DuelChallenge } from '../api'
 import { t, tx } from '../i18n'
 import { MatchMaps } from './TournamentsPanel'
+import { MapHint } from './MapHint'
+import { slotMods } from '../api.hints'
 
 const FORMATS = [1, 3, 5, 7, 9, 11, 13]
 const DIFFICULTY_LABEL: Record<DuelChallenge['difficulty'], string> = {
@@ -213,7 +215,9 @@ export function DuelChallenger({ playerId, npcId, npcName, rival = false, onPlay
                   } disabled:cursor-default`}
                 >
                   <span className="w-8 font-bold">{slot}</span>
-                  <span className="min-w-0 flex-1 truncate">{s.title || '—'}</span>
+                  <MapHint playerId={playerId} beatmapId={s.beatmap_id} mods={slotMods(slot)} className="min-w-0 flex-1 truncate">
+                    {s.title || '—'}
+                  </MapHint>
                   {s.stars != null && <span style={{ color: starColor(s.stars) }}>~{s.stars.toFixed(2)}★</span>}
                   <span className="w-6 text-right">{pick >= 0 ? `#${pick + 1}` : ban ? '🚫' : isTb ? 'TB' : ''}</span>
                 </button>
@@ -238,7 +242,7 @@ export function DuelChallenger({ playerId, npcId, npcName, rival = false, onPlay
       {duel?.status === 'played' && (
         <>
           <ResultLine duel={duel} />
-          <MatchMaps maps={duel.maps} names={[t('You'), duel.opponent]} />
+          <MatchMaps maps={duel.maps} names={[t('You'), duel.opponent]} commentary={duel.commentary} />
           <button onClick={reset} className="rounded bg-panel-light px-3 py-1 font-semibold hover:bg-osu-pink">
             {t('Rematch / new 1v1')}
           </button>
@@ -274,7 +278,7 @@ export function DuelHistory({ playerId, dateKey }: { playerId: number; dateKey: 
             </button>
             {open === d.id && (
               <div className="p-2">
-                <MatchMaps maps={d.maps} names={[t('You'), d.opponent]} />
+                <MatchMaps maps={d.maps} names={[t('You'), d.opponent]} commentary={d.commentary} />
               </div>
             )}
           </div>

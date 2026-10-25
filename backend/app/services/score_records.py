@@ -2,11 +2,24 @@
 import random
 from datetime import date
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from app.config import OSU_CACHE_DIR
 from app.engine import leaderboard as lb, pp_history, world
-from app.models import Beatmap, BeatmapSet, MapScore, Npc, WorldState
-from app.services import leaderboards, media, osu_files, pp
+from app.models import Beatmap, BeatmapSet, MapScore, Npc, Score, WorldState
+from app.services import familiarity, leaderboards, map_prefetch, media, osu_files, pp
+
+
+PREFETCH_BELOW = 60  # keep at least this many era-appropriate maps playable for the world
+PREFETCH_BATCH = 6
+
+
+def _grow_pool(db, on: date, cached_ids: set[int], rng: random.Random) -> None:
+    popular = db.execute(select(Beatmap.id).join(BeatmapSet).where(
+        BeatmapSet.ranked_date <= on, BeatmapSet.status.in_(("ranked", "approved")), Beatmap.stars.between(3.0, 7.5),
+    ).order_by(BeatmapSet.play_count.desc()).limit(500)).scalars().all()
+    missing = [i for i in popular if i not in cached_ids]
+    if missing:
+        map_prefetch.prefetcher.request(rng.sample(missing, min(PREFETCH_BATCH, len(missing))))
 
 
 def consider(db, player, score, on: date, npc=None):
@@ -59,37 +72,49 @@ def weekly(db, player, npcs, on: date, cached_ids: set[int]):
     ).order_by(Beatmap.stars.desc(), Beatmap.id).limit(200))) if cached_ids else []
     active = sorted((n for n in npcs if n.kind == "procedural" and n.status == "active"),
                     key=lambda n: (-n.overall, n.id))[:40]
+    if len(candidates) < PREFETCH_BELOW:
+        _grow_pool(db, on, cached_ids, random.Random(f"prefetch:{player.seed}:{on}"))
     if not candidates or not active:
         return []
     rng = random.Random(f"world-scores:{player.seed}:{on}")
     news = []
-    for beatmap in rng.sample(candidates, min(2, len(candidates))):
+    posted = 0
+    pp_era = pp_history.era_for(on).ranking == "pp"
+    user_best = db.scalar(select(func.max(Score.pp)).where(Score.player_id == player.id)) or 0.0
+    for beatmap in rng.sample(candidates, min(3 if len(candidates) >= 20 else 2, len(candidates))):
         try:
             facts = leaderboards.map_facts(beatmap.id)
         except (osu_files.BeatmapNotFound, pp.InvalidBeatmap, ValueError):
             continue
         for npc in rng.sample(active, min(6, len(active))):
-            est = lb.estimate_best(world.composites(npc.overall, npc.style), facts, on, 5, rng)
+            known = db.scalars(select(MapScore).where(
+                MapScore.player_id == player.id, MapScore.npc_id == npc.id,
+                MapScore.beatmap_id == beatmap.id).order_by(MapScore.score.desc())).first()
+            bonus = 0.10 * familiarity.mastery_from(known.attempts, (on - known.set_on).days) if known else 0.0
+            est = lb.estimate_best(lb.boost(world.composites(npc.overall, npc.style), bonus), facts, on, 5, rng)
+            if known is not None:
+                known.attempts += 5  # a replay of a map they already passed
             if est is None:
                 continue
             value = leaderboards.era_pp(beatmap.id, est.mods, est.accuracy, est.misses, est.max_combo, on)
             # Reject unrealistic analytic attempts; never fabricate a lower pp value for the same play.
             if value > media.era_top_play_pp(on) * 1.2:
                 continue
-            current = db.scalars(select(MapScore).where(
-                MapScore.player_id == player.id, MapScore.npc_id == npc.id,
-                MapScore.beatmap_id == beatmap.id).order_by(MapScore.score.desc())).first()
+            current = known
             if current and current.score >= est.score:
                 continue
             score = MapScore(player_id=player.id, beatmap_id=beatmap.id, kind="npc", npc_id=npc.id,
                              name=npc.name, country=npc.country, mods=est.mods, score=est.score,
                              accuracy=est.accuracy, max_combo=est.max_combo, misses=est.misses,
-                             pp=value, set_on=on, record=False)
+                             pp=value, set_on=on, record=False, attempts=(known.attempts if known else 0) + 5)
             db.add(score)
             db.flush()
             event = consider(db, player, score, on, npc)
             if event:
                 news.append(event)
+            elif pp_era and posted < media.NPC_POSTS_PER_WEEK and media.npc_scorepost(
+                    db, player, npc, score, beatmap, value, rng, user_best):
+                posted += 1
     return news
 
 

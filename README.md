@@ -97,7 +97,9 @@ SillyTavern has no inbound webhook, so the bridge is pull-based. Install the ext
 
 Structured outputs are used on Chat Completion APIs, with a plain-prompt fallback that pulls the JSON out of the reply. If SillyTavern runs on a non-default origin, add it to `TYCOON_CORS_ORIGINS`.
 
-Bridge API: `GET /api/st/careers`, `GET /api/st/careers/{id}/events`, `POST .../events/{eid}/ack`, `POST .../threads/{tid}/comments`, `POST .../irc`, `GET .../context`.
+The engine also creates **ambient** content so the community never goes quiet: every couple of in-game days an `AMBIENT_CHATTER` event for #osu, your country channel or your team channel (with a seeded topic, recent headlines, upcoming tournaments and the channel's last lines so the model doesn't repeat itself), and about weekly a `FORUM_IDEAS` event asking for 2-3 brand new forum threads with comments. Procedural lines and threads fill the gaps when SillyTavern is off. Toggles: *Write everyday IRC chatter*, *Write new forum threads*.
+
+Bridge API: `POST /api/st/careers/{id}/threads`, `GET /api/st/careers`, `GET /api/st/careers/{id}/events`, `POST .../events/{eid}/ack`, `POST .../threads/{tid}/comments`, `POST .../irc`, `GET .../context`.
 
 ## Play presets and map leaderboards
 
@@ -114,7 +116,7 @@ Bridge API: `GET /api/st/careers`, `GET /api/st/careers/{id}/events`, `POST .../
 - [x] Phase 3: living world (legends with career curves, procedural players, injuries/hiatuses/retirements), era-aware rankings, tournaments with double-elimination brackets and stage pools
 - [x] Phase 4: social UI (forum feed, IRC overlay) and the SillyTavern bridge
 - [x] Per-map historical leaderboards (anchor scores + NPC fill, #1 sniping), play presets, scores from map-playing drills
-- [ ] Phase 4: forum feed and IRC overlay, SillyTavern bridge
+- [x] Story layer: life events with choices, goals and story arcs, teams/clans and Clan Cups, replays with live commentary, starting levels
 
 ## Career depth
 
@@ -171,3 +173,19 @@ New careers use the original seeded random talent generation by default. The cre
 `GET /api/players/creation-options` supplies the shared perk catalog and costs. `POST /api/players` accepts `preset`, `perks` and `unbalanced`; the server validates costs and conflicts. Schema v13 migrates existing saves automatically on backend restart.
 
 The World ranking now supports 25, 50, 100, 200, 500 or 1000 displayed rows (100 by default). Worlds contain 1600 procedural careers, or 1200 alongside imported real players, spread across eras. Existing worlds receive missing NPCs once when loaded; only players active in the chosen era appear in the ranking, so a large display limit may return fewer rows.
+
+
+## Story layer (`services/events.py`, `services/goals.py`, `services/teams.py`, `services/story.py`)
+
+- **Life events** (`engine/life_events.py`): about one every two weeks, drawn from a catalogue of ~25 situations (parents limiting screen time, exams, illness, a dying mouse, a rival trash-talking, sponsor pitches, cheat accusations, a wrist ache...). Each has 1-3 options with weighted outcomes: motivation/morale/fatigue/form, money, followers, skill gains, rival heat, injuries, forum threads and lasting effects (less free time, slower learning, worse play). Events never block the calendar: undecided ones expire into a default (usually the careless one) after a few days. Text is bilingual and rendered at read time (`?lang=en|ru`). `GET/POST /api/players/{id}/events`.
+- **Goals and arcs** (`engine/goals.py`): three measurable goals at a time (rank, pp, skill group, streaks, tournament wins, overtaking a rival, a gear upgrade, followers) with deadlines and rewards. Story arcs (Comeback, Breakout season, The wall, Rivalry) are detected from rank history, injuries and rivals, collect dated chapters and become forum threads when they resolve. `GET /api/players/{id}/goals`.
+- **Teams and clans** (`engine/teams.py`): invites from NPC squads, founding your own, recruiting, roles, chemistry and bond, scrims, team IRC channel, weekly team events and a team Clan Cup tier (3v3). `/api/players/{id}/team`.
+- **Replays and live matches** (`engine/replay.py`, `engine/commentary.py`): every simulated attempt returns a replay (combo/HP/strain timeline, key moments) and caster commentary; tournament and duel matches can be watched map by map in the UI.
+
+## Starting levels (`engine/scenarios.py`)
+
+Independent of the talent/weakness build: newcomer (default), rhythm-game veteran (overall ~30), returning veteran (~46), ex-pro (~62, rusty, with followers and money) and phenom (~76, top-100 skills from day one, huge ceiling, 5000 followers). Floors are calibrated against the world's skill -> pp -> rank curve and each has a minimum age. `POST /api/players` takes `scenario`.
+
+## Early-era training
+
+Before dedicated practice maps exist (2007-2011) streams, jumps and slider tech are trained by playing ranked maps (`ranked_streams`, `ranked_jumps`, `ranked_tech`, `wrist_care`): slower than the later tools but never a dead end. A test guarantees every sub-stat is trainable in every era.

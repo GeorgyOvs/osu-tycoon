@@ -183,3 +183,54 @@ def test_gear_follows_the_calendar(client):
     item = gear.CATALOG["hz_144"]
     assert item.price_on(date(2013, 7, 1)) == 280 and item.price_on(date(2030, 1, 1)) == 168
     assert gear.CATALOG["wooting_60he"].is_new(date(2022, 3, 1))
+
+
+def test_user_bans_are_honoured_in_every_pool_and_stage():
+    import random
+
+    from app.engine import match
+
+    def run(pool_names, first_to, bans_per_side, wanted):
+        pool = [match.Slot(n, 6.0, beatmap_id=i + 1) for i, n in enumerate(pool_names)]
+        out = match.run_match(pool, first_to, lambda s: 0.0, lambda s, d: (500, 400, {}), random.Random(1),
+                              bans_per_side=bans_per_side, prefs={"a": {"bans": wanted}})
+        return out
+
+    for pool_names in (match.SMALL_POOL, match.BIG_POOL):
+        for first_to in (5, 6, 7):
+            for per_side in (1, 2):
+                out = run(pool_names, first_to, per_side, ["DT1", "HR1"])
+                spare = len(pool_names) - 1 - (2 * first_to - 2)  # maps that may be banned and still leave a full match
+                if spare <= 0:
+                    assert not out.bans["a"] and not out.bans["b"]
+                    continue
+                assert out.bans["a"][0] == "DT1"  # the chosen slot is banned first, not the AI's pick
+                if per_side == 2 and spare >= 3:
+                    assert out.bans["a"][:2] == ["DT1", "HR1"]
+                banned = set(out.bans["a"]) | set(out.bans["b"])
+                assert not banned & {m.slot for m in out.maps}  # banned maps are never played
+
+
+def test_equal_map_scores_are_not_awarded_to_side_a_by_default():
+    import random
+
+    from app.engine import match
+
+    def play(slot, decisive):
+        players = [{"side": "a", "accuracy": 98.0, "misses": 0}, {"side": "b", "accuracy": 98.54, "misses": 0}]
+        return 1000, 1000, {"players": players}
+
+    pool = [match.Slot(n, 6.0, beatmap_id=i + 1) for i, n in enumerate(match.SMALL_POOL)]
+    out = match.run_match(pool, 3, lambda s: 0.0, play, random.Random(5))
+    assert all(m.detail["tie"] == "accuracy" and m.winner == "b" for m in out.maps)  # higher accuracy decides
+    assert out.winner == "b" and out.score_a == 0
+
+    def identical(slot, decisive):
+        return 500, 500, {"players": [{"side": "a", "accuracy": 98.5, "misses": 0}, {"side": "b", "accuracy": 98.5, "misses": 0}]}
+
+    wins = {"a": 0, "b": 0}
+    for seed in range(60):
+        out = match.run_match(pool, 1, lambda s: 0.0, identical, random.Random(seed))
+        assert out.maps[0].detail["tie"] == "sudden_death" and out.maps[0].detail["winner"] == out.maps[0].winner
+        wins[out.maps[0].winner] += 1
+    assert 15 <= wins["a"] <= 45  # a fair coin, not 'a always'

@@ -42,16 +42,23 @@ class Estimate:
 
 
 def mod_allowed(mods: str, on: date, ar: float, rng: random.Random) -> bool:
-    """Era meta: DT was rare early on, and HDDT on high-AR maps only became normal around 2013."""
+    """Era meta. DT and HDDT were part of score chasing from the early days (a stronger player simply took the
+    higher multiplier), so they are mostly available; only the very first years are thinner, and HDDT on AR10+
+    maps wasn't done before ~2010."""
     year = on.year + on.month / 12
     if "DT" in mods:
-        if rng.random() > min(0.9, max(0.1, (year - 2009.5) / 4)):
+        if rng.random() > min(0.95, max(0.6, 0.6 + 0.12 * (year - 2008))):
             return False
-        if "HD" in mods and ar >= 9 and year < 2013:
+        if "HD" in mods and ar >= 9.8 and year < 2010:
             return False
     if "HR" in mods and year < 2009 and rng.random() < 0.5:
         return False
     return True
+
+
+def boost(comps: dict[str, float], bonus: float) -> dict[str, float]:
+    """Map mastery: knowing a map by heart is worth a few percent of skill on it."""
+    return comps if bonus <= 0 else {g: min(115.0, v * (1 + bonus)) for g, v in comps.items()}
 
 
 def estimate_best(

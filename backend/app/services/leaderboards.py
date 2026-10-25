@@ -23,7 +23,7 @@ from app.config import PP_LAZER
 from app.engine import leaderboard as lb
 from app.engine import scoring, world, pp_history
 from app.models import Beatmap, BeatmapSet, MapBoard, MapScore, Npc, Player, Score
-from app.services import beatmap_index, osu_files, rivals, sessions, pp
+from app.services import beatmap_index, familiarity, osu_files, rivals, sessions, pp
 
 ANCHOR_FILE = Path(__file__).resolve().parent.parent / "data" / "anchor_scores.json"
 ANCHOR_FIELDS = {"beatmap_id", "player", "country", "mods", "score", "accuracy", "max_combo", "misses", "date", "source"}
@@ -140,6 +140,16 @@ def ensure_board(db: Session, player: Player, beatmap_id: int) -> tuple[MapBoard
             if _could_ever_pass(n, easiest)]
 
     snipes: list[SnipeOfUser] = []
+    updates: list[dict] = []
+    top = {"score": 0, "name": "", "npc_id": None, "legend": False}
+    for sc in existing.values():
+        if sc.score > top["score"]:
+            top = {"score": sc.score, "name": sc.name, "npc_id": sc.npc_id, "legend": False}
+    for a in anchors().get(beatmap_id, []):
+        if date.fromisoformat(a["date"]) <= target and int(a["score"]) > top["score"]:
+            top = {"score": int(a["score"]), "name": a["player"], "npc_id": None, "legend": True}
+    if user_best > top["score"]:
+        top = {"score": user_best, "name": player.name, "npc_id": None, "legend": False, "user": True}
     hunters = rivals.rival_npc_ids(db, player) if board.user_first else set()  # rivals go after your #1s
     start = board.generated_through + timedelta(days=1)
     for month in _months(start, target):
@@ -152,15 +162,21 @@ def ensure_board(db: Session, player: Player, beatmap_id: int) -> tuple[MapBoard
             overall = _overall_at(npc, month)
             if overall is None:
                 continue
-            est = lb.estimate_best(world.composites(overall, npc.style), facts, month, rng.randint(2, 8), rng)
+            tries = rng.randint(2, 8)
+            seen = existing.get(npc.id)
+            # Replaying a map you passed before: the more you played it, the better you know it.
+            bonus = 0.10 * familiarity.mastery_from(seen.attempts, (month - seen.set_on).days) if seen else 0.0
+            est = lb.estimate_best(lb.boost(world.composites(overall, npc.style), bonus), facts, month, tries, rng)
+            if seen is not None:
+                seen.attempts += tries  # even a worse run is practice
             if est is None:
                 continue
-            current = existing.get(npc.id)
+            current = seen
             if current is not None and current.score >= est.score:
                 continue
             if current is None or current.record:
                 current = MapScore(player_id=player.id, beatmap_id=beatmap_id, kind="npc", npc_id=npc.id,
-                                   name=npc.name, country=npc.country, pp=0.0)
+                                   name=npc.name, country=npc.country, pp=0.0, attempts=(seen.attempts if seen else 0) + tries)
                 db.add(current)
                 existing[npc.id] = current
             set_on = min(target, month + timedelta(days=rng.randint(0, 27)))
@@ -169,9 +185,73 @@ def ensure_board(db: Session, player: Player, beatmap_id: int) -> tuple[MapBoard
             if board.user_first and user_best and est.score > user_best:
                 board.user_first = False
                 snipes.append(SnipeOfUser(npc, current))
+            updates.append({"npc_id": npc.id, "name": npc.name, "legend": npc.kind == "legend", "score": current.score,
+                            "mods": current.mods, "accuracy": current.accuracy, "set_on": set_on})
     board.generated_through = target
     db.flush()
+    _announce_takeovers(db, player, bset, beatmap_id, _takeovers(top, updates), target)
     return board, snipes
+
+
+def _takeovers(top: dict, updates: list[dict]) -> list[dict]:
+    """Walk the new scores in date order from the board's previous #1 and note every change of the guard."""
+    baseline = dict(top)
+    out: list[dict] = []
+    for u in sorted(updates, key=lambda x: (x["set_on"], -x["score"])):
+        if u["score"] <= baseline["score"]:
+            continue
+        if baseline["name"] and not baseline.get("user") and baseline["npc_id"] != u["npc_id"]:
+            out.append({**u, "from": baseline["name"], "from_legend": baseline["legend"]})
+        baseline = {"score": u["score"], "name": u["name"], "npc_id": u["npc_id"], "legend": u["legend"]}
+    return out
+
+
+TAKEOVER_NEWS_DAYS = 120  # older changes of the guard are board history, not news
+TAKEOVER_THREAD_DAYS = 45
+MAX_TAKEOVER_THREADS = 2
+
+
+def _announce_takeovers(db: Session, player: Player, bset: BeatmapSet, beatmap_id: int, takeovers: list[dict],
+                        target: date) -> None:
+    """NPCs and legends taking #1 from each other: world news, and a thread when it is fresh and notable."""
+    from app.services import media, tournaments
+
+    threads = 0
+    title = f"{bset.artist} - {bset.title}"
+    for t in takeovers:
+        age = (target - t["set_on"]).days
+        notable = t["legend"] or t["from_legend"]
+        message = f"{t['name']} took #1 on {title} from {t['from']}."
+        # Old changes of the guard stay as map history (importance 0, hidden from the news feed).
+        importance = 0 if age > TAKEOVER_NEWS_DAYS else (2 if notable else 1)
+        tournaments._news(db, player, t["set_on"], "NPC_SNIPE", message, importance,
+                          {"npc_id": t["npc_id"], "sniped": t["from"], "map": title, "score": t["score"],
+                           "mods": t["mods"], "accuracy": t["accuracy"], "beatmap_id": beatmap_id,
+                           "beatmapset_id": bset.id}, [])
+        if age > TAKEOVER_NEWS_DAYS:
+            continue
+        if age <= TAKEOVER_THREAD_DAYS and threads < MAX_TAKEOVER_THREADS and (notable or bset.play_count >= 200_000):
+            threads += 1
+            rng = media._rng(player, "npc-snipe", bset.id, t["name"], t["score"])
+            media.emit(db, player, "NPC_SNIPE", {"map": title, "sniper": t["name"], "sniped": t["from"],
+                                                 "sniper_score": {"score": t["score"], "mods": t["mods"] or "Nomod",
+                                                                  "accuracy": t["accuracy"]}},
+                       kind="snipe", title=f"{t['name']} snipes {t['from']}'s #1 on {title}", flair="Gameplay",
+                       base_upvotes=700 if notable else 70, tone="banter, 'who is next'", event_date=t["set_on"],
+                       fmt={"player": t["name"], "sniped": t["from"], "age": "a while", "map_short": media._short(title)},
+                       reactions=media._reactions(db, player, rng, 1, f"Just took #1 on {title} from {t['from']}.",
+                                                  [t["npc_id"]] if t["npc_id"] else None))
+
+
+def advance_stale(db: Session, player: Player, limit: int = 4) -> None:
+    """Keep opened boards moving as time passes, so the guard changes (and gets reported) without being watched."""
+    cutoff = player.in_game_date - timedelta(days=21)
+    for board in list(db.scalars(select(MapBoard).where(MapBoard.player_id == player.id, MapBoard.generated_through < cutoff)
+                                 .order_by(MapBoard.generated_through).limit(limit))):
+        try:
+            ensure_board(db, player, board.beatmap_id)
+        except Exception:  # noqa: BLE001 - a map that can't be analysed must not stop the world
+            continue
 
 
 def _could_ever_pass(npc: Npc, easiest_stars: float) -> bool:
@@ -241,7 +321,8 @@ def board_entries(db: Session, player: Player, beatmap_id: int, limit: int = 50)
             continue
         seen.add(identity)
         if i < limit or s.record:
-            s.pp = era_pp(beatmap_id, s.mods, s.accuracy, s.misses, s.max_combo, on, s.set_on)
+            # Everyone's pp is the formula of the board's date: same play, same pp, whenever it was set.
+            s.pp = era_pp(beatmap_id, s.mods, s.accuracy, s.misses, s.max_combo, on)
         if s.record:
             record_ids.add(s.npc_id)
         kind = "legend" if npc_kinds.get(s.npc_id) == "legend" else "npc"
@@ -267,6 +348,35 @@ def board_entries(db: Session, player: Player, beatmap_id: int, limit: int = 50)
     if you and you not in top:
         top.append(you)
     return top
+
+
+def placement(db: Session, player: Player, beatmap_id: int, score_value: int) -> tuple[int, int] | None:
+    """(rank, size) that a play worth `score_value` takes on the map's board, among everyone else's best."""
+    try:
+        ensure_board(db, player, beatmap_id)
+    except beatmap_index.NotPlayable:
+        return None
+    on = player.in_game_date
+    best: dict[tuple, int] = {}
+    for s in db.scalars(select(MapScore).where(MapScore.player_id == player.id, MapScore.beatmap_id == beatmap_id,
+                                              MapScore.set_on <= on)):
+        identity = (s.kind, s.npc_id if s.npc_id else s.name)
+        best[identity] = max(best.get(identity, 0), s.score)
+    for a in anchors().get(beatmap_id, []):
+        if date.fromisoformat(a["date"]) <= on:
+            best[("anchor", a["player"])] = max(best.get(("anchor", a["player"]), 0), int(a["score"]))
+    return 1 + sum(1 for v in best.values() if v > score_value), len(best) + 1
+
+
+def first_place_history(db: Session, player: Player, beatmap_id: int) -> list[dict]:
+    """Every change of the guard on this map that the world has recorded, oldest first."""
+    from app.models import WorldEvent
+
+    rows = db.scalars(select(WorldEvent).where(WorldEvent.player_id == player.id, WorldEvent.type == "NPC_SNIPE",
+                                               WorldEvent.date <= player.in_game_date).order_by(WorldEvent.date, WorldEvent.id))
+    return [{"date": e.date, "sniper": e.message.split(" took #1")[0], "sniped": e.data.get("sniped", ""),
+             "score": e.data.get("score", 0), "mods": e.data.get("mods", "") or "", "accuracy": e.data.get("accuracy", 0.0)}
+            for e in rows if e.data.get("beatmap_id") == beatmap_id]
 
 
 def record_history(db: Session, player: Player, beatmap_id: int) -> list[Entry]:

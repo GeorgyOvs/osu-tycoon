@@ -62,3 +62,36 @@ def test_old_world_population_upgrade_is_idempotent(client):
         count = db.query(Npc).filter_by(player_id=pid).count()
         world_service.ensure_world(db, db.get(Player, pid))
         assert db.query(Npc).filter_by(player_id=pid).count() == count
+
+
+def test_start_scenarios_start_far_above_a_newcomer():
+    from app.engine import attributes as A
+    from app.engine import scenarios, world
+
+    def overall(key):
+        p = simulation.new_career("User", "RU", date(2016, 1, 1), 42)
+        scenarios.apply(p, scenarios.SCENARIOS[key])
+        return A.overall(simulation.effective_values(p)), p
+
+    values = {k: overall(k)[0] for k in scenarios.SCENARIOS}
+    order = ["newcomer", "rhythm_gamer", "returning_veteran", "ex_pro", "phenom"]
+    assert [values[k] for k in order] == sorted(values[k] for k in order)
+    assert values["newcomer"] < 20 and values["phenom"] > 70
+    # calibrated against the world: an ex-pro lands in the low thousands, a phenom in the top ~500
+    assert world.pp_for_overall(values["phenom"], date(2016, 1, 1)) > 3 * world.pp_for_overall(values["newcomer"], date(2016, 1, 1))
+    _, phenom = overall("phenom")
+    assert all(a.base < a.cap for a in phenom.attributes) and phenom.followers >= 5000
+
+
+def test_scenarios_are_deterministic_and_validated(client):
+    body = dict(name='Vet', country='RU', start_date='2014-01-01', seed=7, age=20, scenario='ex_pro')
+    a = client.post('/api/players', json=body)
+    assert a.status_code == 201, a.text
+    b = client.post('/api/players', json=body)
+    key = lambda r: [(g['key'], round(g['value'], 1)) for g in r.json()['attributes']]
+    assert key(a) == key(b)
+    assert any(g['value'] > 50 for g in a.json()['attributes'])
+    assert 'Бывший топ-игрок' in a.json()['traits']
+    assert client.post('/api/players', json={**body, 'age': 12}).status_code == 422  # too young for an ex-pro
+    assert client.post('/api/players', json={**body, 'scenario': 'god'}).status_code == 422
+    assert 'phenom' in client.get('/api/players/creation-options').json()['scenarios']

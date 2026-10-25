@@ -15,6 +15,8 @@ const defaults = {
     pollSeconds: 20,
     forum: true,
     irc: true,
+    ambient: true,
+    threads: true,
     narrate: false,
     structured: true,
 };
@@ -114,7 +116,16 @@ async function handleEvent(event) {
             });
         }
     }
-    if (s.irc && event.prompts.irc) {
+    if (s.threads && event.prompts.threads) {
+        const result = await generateJson(event.prompts.threads, event.schemas.threads, 'threads');
+        if (result?.threads?.length) {
+            await api(`/api/st/careers/${id}/threads`, {
+                method: 'POST',
+                body: JSON.stringify({ threads: result.threads.slice(0, 4) }),
+            });
+        }
+    }
+    if (s.irc && event.prompts.irc && (event.type !== 'AMBIENT_CHATTER' || s.ambient)) {
         const result = await generateJson(event.prompts.irc, event.schemas.irc, 'lines');
         if (result?.lines?.length) {
             await api(`/api/st/careers/${id}/irc`, {
@@ -222,7 +233,9 @@ function settingsHtml() {
       <div class="row"><label for="osu_tycoon_poll">Check every (seconds)</label><input type="number" min="5" id="osu_tycoon_poll" class="text_pole"></div>
       ${checkbox('enabled', 'Enabled')}
       ${checkbox('forum', 'Write forum comments')}
-      ${checkbox('irc', 'Write IRC chatter')}
+      ${checkbox('irc', 'Write IRC chatter (reactions)')}
+      ${checkbox('ambient', 'Write everyday IRC chatter between events')}
+      ${checkbox('threads', 'Write new forum threads')}
       ${checkbox('narrate', 'Narrate events into the current chat')}
       ${checkbox('structured', 'Use structured outputs (Chat Completion APIs)')}
       <div class="row"><div id="osu_tycoon_now" class="menu_button">Process events now</div></div>
@@ -253,7 +266,7 @@ function bindSettings() {
         save();
         restartTimer();
     });
-    for (const key of ['enabled', 'forum', 'irc', 'narrate', 'structured']) {
+    for (const key of ['enabled', 'forum', 'irc', 'ambient', 'threads', 'narrate', 'structured']) {
         $(`#osu_tycoon_${key}`).prop('checked', !!s[key]).on('change', function () {
             s[key] = $(this).prop('checked');
             save();

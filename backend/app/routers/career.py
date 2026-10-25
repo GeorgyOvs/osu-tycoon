@@ -20,6 +20,7 @@ from app.services import (
     autoplay,
     beatmap_index,
     condition,
+    profile_stats,
     life,
     media,
     profile,
@@ -108,6 +109,8 @@ def _run(db: Session, player: Player, plan: simulation.DayPlan, days: int) -> Ac
     result.events += life.apply_days(player, result.start_date, result.end_date, plan.hours if plan.is_training else 0)
     if plan.is_training:
         condition.progress_adaptation(player, plan.hours * result.days)
+        if not (plan.drill and plan.drill.ranked_preset):  # map-playing drills count their own attempts
+            profile_stats.add_play(player, plan.hours * result.days * 3600 * 0.8)
     news = world_service.advance(db, player)
     media.after_action(db, player, rank_before, result.events, news)
     db.commit()
@@ -134,6 +137,16 @@ def _replay_drill(db: Session, player: Player, drill: Drill) -> Drill:
     return replace(drill, era_efficiency={era: factor for era in ERA_ORDER})
 
 
+def _lobby_drill(player: Player, drill: Drill) -> Drill:
+    """Public lobbies are played across regions: a high ping makes them less useful."""
+    from app.engine import network
+    from app.services import setup
+
+    ms = network.lobby_ping(network.region(player.country), player.in_game_date.year, setup.isp_level(player))
+    factor = max(0.7, 1 - 1.5 * (network.pressure_factor(ms) - 1))
+    return replace(drill, era_efficiency={era: drill.efficiency(player.in_game_date) * factor for era in ERA_ORDER})
+
+
 @router.get("/drills", response_model=list[DrillOut])
 def list_drills(player_id: int, db: Session = Depends(get_db)) -> list[DrillOut]:
     player = get_player_or_404(db, player_id)
@@ -148,6 +161,8 @@ def train(player_id: int, body: TrainRequest, db: Session = Depends(get_db)) -> 
         raise HTTPException(422, f"unknown drill '{body.drill}'")
     if drill.key == "watch_replays":
         drill = _replay_drill(db, player, drill)
+    if drill.key == "multiplayer_lobbies":
+        drill = _lobby_drill(player, drill)
     learning, caps = condition.learning_extras(db, player)
     plan = simulation.DayPlan(drill=drill, hours=body.hours_per_day, learning=learning, caps=caps)
     return _run(db, player, plan, body.days)

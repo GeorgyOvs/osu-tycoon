@@ -6,7 +6,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.db import get_db
-from app.engine import simulation, character
+from app.engine import character, scenarios, simulation
 from app.models import Player
 from app.routers.pp import load_and_calculate
 from app.schemas import PlayerCreate, PlayerOut, PlayerProfile, ScoreOut, ScoreSubmit, ScoreSubmitResult
@@ -14,13 +14,17 @@ from app.engine import scoring
 from app.services import (
     beatmap_index,
     condition,
+    goals,
+    integrity,
     leaderboards,
     life,
     media,
     osu_files,
     pp,
     profile,
+    profile_stats,
     rivals,
+    story,
     world_service,
 )
 
@@ -42,13 +46,14 @@ def list_players(db: Session = Depends(get_db)) -> list[PlayerOut]:
 @router.get("/creation-options")
 def creation_options() -> dict:
     return {"budget": character.BUDGET, "perks": character.PERKS,
-            "presets": character.PRESETS, "conflicts": character.CONFLICTS}
+            "presets": character.PRESETS, "conflicts": character.CONFLICTS, "scenarios": scenarios.options()}
 
 
 @router.post("", response_model=PlayerProfile, status_code=status.HTTP_201_CREATED)
 def create_player(body: PlayerCreate, db: Session = Depends(get_db)) -> PlayerProfile:
     try:
         perks = character.resolve(body.preset, body.perks, body.unbalanced)
+        scenario = scenarios.validate(body.scenario, body.age)
     except ValueError as e:
         raise HTTPException(422, str(e)) from e
     seed = body.seed if body.seed is not None else secrets.randbits(31)
@@ -59,11 +64,21 @@ def create_player(body: PlayerCreate, db: Session = Depends(get_db)) -> PlayerPr
     player = simulation.new_career(body.name, body.country.upper(), body.start_date, seed, birth, occupation,
                                    body.gender)
     character.apply(player, body.preset, perks, body.unbalanced)
+    scenarios.apply(player, scenario)
+    player.character_build = {**player.character_build, "scenario": scenario.key}
+    if body.hardcore:
+        player.character_build["hardcore"] = True
+    if body.realistic_economy:
+        player.character_build["economy"] = "realistic"
+    story.put(player, "records", {"started_on": body.start_date.isoformat()})
+    story.put_date(player, "events_rolled_through", body.start_date)
     db.add(player)
     db.flush()
     world_service.ensure_world(db, player)
     condition.ensure_gear(db, player)
     condition.refresh_ergonomics(db, player)
+    goals.tick(db, player, [])
+    profile_stats.snapshot(db, player)
     db.commit()
     beatmap_index.syncer.request(player.in_game_date)
     return profile.to_profile(db, player)
@@ -75,8 +90,11 @@ def get_player(player_id: int, db: Session = Depends(get_db)) -> PlayerProfile:
 
 
 @router.delete("/{player_id}", status_code=status.HTTP_204_NO_CONTENT)
-def delete_player(player_id: int, db: Session = Depends(get_db)) -> None:
-    db.delete(get_player_or_404(db, player_id))
+def delete_player(player_id: int, confirm: str | None = None, db: Session = Depends(get_db)) -> None:
+    player = get_player_or_404(db, player_id)
+    if (player.character_build or {}).get("hardcore") and confirm != player.name:
+        raise HTTPException(409, "hardcore careers can only be deleted by typing the player's name to confirm")
+    db.delete(player)
     db.commit()
 
 
@@ -85,6 +103,10 @@ def submit_score(
     player_id: int, body: ScoreSubmit, db: Session = Depends(get_db)
 ) -> ScoreSubmitResult:
     player = get_player_or_404(db, player_id)
+    try:
+        integrity.check_unrestricted(player)
+    except integrity.IntegrityError as e:
+        raise HTTPException(e.status_code, str(e)) from e
     try:
         beatmap_index.check_playable(db, player.in_game_date, body.beatmap_id)
     except beatmap_index.NotPlayable as e:

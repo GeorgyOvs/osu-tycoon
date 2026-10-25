@@ -66,3 +66,32 @@ def test_map_playing_drills_set_real_scores(client):
     practice = client.post(f"/api/players/{pid}/train",
                            json={"drill": "stream_practice", "hours_per_day": 3, "days": 2}).json()
     assert practice["scores"] == []  # unranked practice maps don't give pp
+
+
+def test_mod_combination_presets(client):
+    pid = _career(client, skill=40)
+    presets = {p["key"]: p for p in client.get(f"/api/players/{pid}/presets").json()}
+    assert [presets[k]["mods"] for k in ("hdhr", "hddt", "hdhrdt")] == ["HDHR", "HDDT", "HDHRDT"]
+    for key, mods in (("hdhr", "HDHR"), ("hddt", "HDDT"), ("hdhrdt", "HDHRDT")):
+        r = client.post(f"/api/players/{pid}/sessions/auto", json={"preset": key, "hours": 0.5})
+        assert r.status_code == 200, r.text
+        assert r.json()["plays"] and all(p["mods"] == mods for p in r.json()["plays"])
+    old = _career(client, start="2010-03-01")
+    assert client.post(f"/api/players/{old}/sessions/auto", json={"preset": "hddt", "hours": 1}).status_code == 409
+
+
+def test_session_history_persists_and_reports_board_placement(client):
+    pid = _career(client, skill=40)
+    assert client.get(f"/api/players/{pid}/sessions/history").json() == []
+    auto = client.post(f"/api/players/{pid}/sessions/auto", json={"preset": "farm", "hours": 0.5}).json()
+    manual = client.post(f"/api/players/{pid}/sessions", json={"plays": [{"beatmap_id": auto["plays"][0]["beatmap"]["beatmap_id"],
+                                                                            "mods": "", "attempts": 2}]}).json()
+    history = client.get(f"/api/players/{pid}/sessions/history").json()
+    assert [h["mode"] for h in history] == ["manual", "auto"]
+    assert history[1]["result"]["plays"][0]["beatmap"] == auto["plays"][0]["beatmap"]
+    passed = [p for p in auto["plays"] + manual["plays"] if p["score"]]
+    assert passed
+    ranked = [p for p in passed if p["board_rank"]]
+    assert ranked and len(ranked) <= 3 + len(passed) // 2 + 1  # boards are simulated lazily past the budget
+    for p in ranked:
+        assert 1 <= p["board_rank"] <= p["board_size"]

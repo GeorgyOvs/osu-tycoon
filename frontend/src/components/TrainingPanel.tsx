@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useState } from 'react'
+import { usePersisted } from '../usePersisted'
 import { api, type ActionResult, type Drill, type Player } from '../api'
 import { days as daysText, t } from '../i18n'
 
@@ -16,11 +17,11 @@ const ERA_NAMES: Record<string, string> = {
 
 export function TrainingPanel({ player, onAction }: Props) {
   const [drills, setDrills] = useState<Drill[]>([])
-  const [drillKey, setDrillKey] = useState('')
-  const [hours, setHours] = useState(4)
-  const [days, setDays] = useState(7)
-  const [restDays, setRestDays] = useState(2)
-  const [physio, setPhysio] = useState(false)
+  const [drillKey, setDrillKey] = usePersisted('train.drill', '')
+  const [hours, setHours] = usePersisted('train.hours', 4)
+  const [days, setDays] = usePersisted('train.days', 7)
+  const [restDays, setRestDays] = usePersisted('train.restDays', 2)
+  const [physio, setPhysio] = usePersisted('train.physio', false)
   const [busy, setBusy] = useState(false)
   const [error, setError] = useState<string | null>(null)
 
