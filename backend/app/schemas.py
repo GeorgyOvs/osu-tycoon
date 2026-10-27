@@ -720,6 +720,10 @@ class DuelOut(BaseModel):
     commentary: dict | None = None
 
 
+class DraftHandIn(BaseModel):
+    on: bool
+
+
 class DraftActIn(BaseModel):
     slot: str = Field(min_length=2, max_length=4)
 
@@ -744,3 +748,5 @@ class DraftOut(BaseModel):
     log: list[dict]
     maps: list[dict]
     warmup: dict
+    hand: bool = False  # the user plays the chosen maps by hand in the client
+    awaiting: dict | None = None  # the map waiting to be played by hand

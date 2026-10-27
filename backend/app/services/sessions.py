@@ -8,7 +8,7 @@ from functools import lru_cache
 from sqlalchemy.orm import Session
 
 from app.engine import psychology
-from app.engine import play, pp_history, scoring, simulation
+from app.engine import play, playstyle, pp_history, scoring, simulation
 from app.engine.map_analysis import MapProfile, analyze
 from app.engine.training import ERA_ORDER, Drill
 from app.models import MapBoard, Player
@@ -96,7 +96,8 @@ def _prepare(db: Session, player: Player, req: PlayRequest) -> tuple[osu_files.B
 
 
 def day_modifiers(player: Player) -> play.DayModifiers:
-    return play.DayModifiers(form=player.form, fatigue=player.fatigue, motivation=player.motivation)
+    return play.DayModifiers(form=player.form, fatigue=player.fatigue, motivation=player.motivation,
+                             timing_bias=playstyle.timing_bias(player.seed))
 
 
 def _challenge(attempt: play.Attempt) -> float:
@@ -233,24 +234,32 @@ PLACEMENT_BUDGET = 2  # boards that must be simulated from scratch cost ~1-2s ea
 
 def _record_best(db: Session, player: Player, req: PlayRequest, meta, mods: str, prof: MapProfile,
                  best: AttemptResult, placements: list[int] | None = None) -> profile.Recorded:
+    a = best.attempt
+    return record_pass(db, player, req.beatmap_id, meta, mods, prof, accuracy=a.accuracy, n300=a.n300, n100=a.n100,
+                       n50=a.n50, misses=a.misses, max_combo=a.max_combo, perf=best.perf, placements=placements)
+
+
+def record_pass(db: Session, player: Player, beatmap_id: int, meta, mods: str, prof: MapProfile, *, accuracy: float,
+                n300: int, n100: int, n50: int, misses: int, max_combo: int, perf: pp.PpResult | None,
+                placements: list[int] | None = None) -> profile.Recorded:
+    """Store a passed play as a career score, place it on the map's board and let the world react
+    (snipes, rivals, score posts). Shared by simulated sessions and plays made by hand in the client."""
     from app.services import leaderboards  # leaderboards needs map_profile from this module
 
-    a = best.attempt
-    difficulty = leaderboards.map_facts(req.beatmap_id).difficulty[""]
-    perf = best.perf
+    difficulty = leaderboards.map_facts(beatmap_id).difficulty[""]
     recorded = profile.record_score(
-        db, player, meta, mods, accuracy=a.accuracy, max_combo=a.max_combo,
-        misses=a.misses, stars=prof.stars, pp=perf.pp if perf else 0.0,
-        score_value=scoring.score_v1(a.n300, a.n100, a.n50, a.misses, a.max_combo, prof.max_combo, difficulty, mods),
+        db, player, meta, mods, accuracy=accuracy, max_combo=max_combo,
+        misses=misses, stars=prof.stars, pp=perf.pp if perf else 0.0,
+        score_value=scoring.score_v1(n300, n100, n50, misses, max_combo, prof.max_combo, difficulty, mods),
         pp_aim=perf.pp_aim if perf else 0.0, pp_speed=perf.pp_speed if perf else 0.0,
         pp_acc=perf.pp_accuracy if perf else 0.0, map_max_combo=prof.max_combo,
     )
-    board = db.get(MapBoard, (player.id, req.beatmap_id))
+    board = db.get(MapBoard, (player.id, beatmap_id))
     fresh = board is not None and board.generated_through >= player.in_game_date
     if fresh or (placements and placements[0] > 0):
         if not fresh and placements:
             placements[0] -= 1
-        placed = leaderboards.placement(db, player, req.beatmap_id, recorded.score.score_value)
+        placed = leaderboards.placement(db, player, beatmap_id, recorded.score.score_value)
     else:
         placed = None
     if placed:
@@ -258,10 +267,10 @@ def _record_best(db: Session, player: Player, req: PlayRequest, meta, mods: str,
     snipe = leaderboards.on_user_score(db, player, recorded.score)
     if snipe:
         media.snipe_first_place(db, player, f"{meta.artist} - {meta.title} [{meta.version}]", snipe.sniped,
-                                snipe.user_entry, leaderboards.map_play_count(db, req.beatmap_id))
+                                snipe.user_entry, leaderboards.map_play_count(db, beatmap_id))
         rivals.on_snipe(db, player, snipe.sniped.npc_id, user_sniped=True)
     if recorded.top_play_position:
-        fc_pp = pp.calculate(osu_files.get_osu_file(req.beatmap_id), mods, accuracy=a.accuracy).pp
+        fc_pp = pp.calculate(osu_files.get_osu_file(beatmap_id), mods, accuracy=accuracy).pp
         media.score_submission(db, player, recorded.score, prof.max_combo, fc_pp, recorded.top_play_position)
     return recorded
 
@@ -285,13 +294,20 @@ def run_session(db: Session, player: Player, requests: list[PlayRequest], stream
             streaming.check(player)
         except streaming.StreamError as e:
             raise SessionError(e.status_code, str(e)) from e
-    start = player.in_game_date
     played = play_maps(db, player, requests, pressure=streaming.LIVE_PRESSURE if stream else 1.0, prepared=ready)
     stream_events = streaming.apply(db, player, played.plays, played.elapsed / 3600) if stream else []
+    action, drill = finish_day(db, player, played, stream_events)
+    return SessionResult(hours=played.elapsed / 3600, plays=played.plays, action=action, training=drill.targets)
+
+
+def finish_day(db: Session, player: Player, played: Played,
+               extra_events: list | None = None) -> tuple[simulation.ActionResult, Drill]:
+    """Close a day of playing: training from what the maps demanded, fatigue, life, and the calendar moves on."""
+    start = player.in_game_date
     drill = played.as_drill()
     hours = played.elapsed / 3600
     learning, caps = condition.learning_extras(db, player)
     action = simulation.run_days(player, simulation.DayPlan(drill=drill, hours=hours, learning=learning, caps=caps), 1)
-    action.events += stream_events + life.apply_days(player, start, player.in_game_date, hours)
+    action.events += (extra_events or []) + life.apply_days(player, start, player.in_game_date, hours)
     condition.progress_adaptation(player, hours)
-    return SessionResult(hours=hours, plays=played.plays, action=action, training=drill.targets)
+    return action, drill

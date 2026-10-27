@@ -56,7 +56,7 @@ def test_mirror_client_search_params_and_errors():
 
 
 class PagedMirror:
-    """250 ranked sets one day apart from 2008-01-01, plus 30 approved ones."""
+    """250 ranked sets one day apart from 2008-01-01, plus 30 approved and 5 loved ones."""
 
     def __init__(self):
         start = date(2008, 1, 1)
@@ -67,6 +67,10 @@ class PagedMirror:
             mirror.STATUS_APPROVED: [
                 make_set(20_000 + i, start + timedelta(days=3 * i), [200_000 + i], status="approved")
                 for i in range(30)
+            ],
+            mirror.STATUS_LOVED: [
+                make_set(30_000 + i, date(2016, 10, 16) + timedelta(days=7 * i), [300_000 + i], status="loved")
+                for i in range(5)
             ],
         }
         self.calls = []
@@ -91,6 +95,7 @@ def test_sync_crawls_only_up_to_target_and_resumes():
 
         beatmap_index.sync_until(db, fake, date(2030, 1, 1))
         assert db.get(SyncState, mirror.STATUS_RANKED).exhausted
+        assert db.get(SyncState, mirror.STATUS_LOVED).exhausted  # loved maps are indexed too
         assert beatmap_index.synced_until(db) == date.max
 
 

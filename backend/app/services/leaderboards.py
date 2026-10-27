@@ -108,9 +108,10 @@ class SnipeOfUser:
 def _ranked_set(db: Session, beatmap_id: int) -> BeatmapSet:
     beatmap = db.get(Beatmap, beatmap_id)
     if beatmap is not None:
-        return beatmap.beatmapset
-    bset, status = beatmap_index.lookup_set_for_beatmap(db, beatmap_index.default_client(), beatmap_id)
-    if bset is None:
+        bset, status = beatmap.beatmapset, beatmap.beatmapset.status
+    else:
+        bset, status = beatmap_index.lookup_set_for_beatmap(db, beatmap_index.default_client(), beatmap_id)
+    if bset is None or bset.status not in beatmap_index.PP_STATUS_NAMES:  # loved maps have no simulated board
         raise beatmap_index.NotPlayable(422 if status else 404, f"beatmap {beatmap_id} has no ranked leaderboard")
     return bset
 

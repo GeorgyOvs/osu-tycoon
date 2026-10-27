@@ -11,7 +11,8 @@ from app.models import Player
 from app.routers import spending, hints, profile_page, search, integrity as integrity_router
 from app.routers import beatmaps, career, duels, events, goals, life, play, players, pp, social, teams, week, world
 from app.routers import legacy as legacy_router
-from app.routers import real
+from app.routers import backup as backup_router
+from app.routers import client, osu_api, real
 from app.routers import notifications as notifications_router
 from app.services import beatmap_index, tournaments, world_service, score_records
 
@@ -43,6 +44,7 @@ app.add_middleware(
 )
 app.include_router(pp.router)
 app.include_router(players.router)
+app.include_router(backup_router.router)
 app.include_router(spending.router)
 app.include_router(hints.router)
 app.include_router(profile_page.router)
@@ -67,6 +69,20 @@ app.include_router(teams.router)
 app.include_router(legacy_router.router)
 app.include_router(legacy_router.hall)
 app.include_router(real.router)
+app.include_router(client.router)
+app.include_router(client.players_router)
+app.include_router(osu_api.early)
+app.include_router(osu_api.router)
+
+
+@app.middleware("http")
+async def strip_api_v2_trailing_slash(request, call_next):
+    # lazer asks for "me/" and "users/{id}/" when no ruleset is chosen yet; a redirect would drop its Authorization
+    # header (HTTP clients don't forward it), so route those paths directly instead.
+    path = request.scope["path"]
+    if path.startswith("/api/v2/") and path.endswith("/"):
+        request.scope["path"] = path.rstrip("/")
+    return await call_next(request)
 
 
 @app.get("/api/health")

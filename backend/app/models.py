@@ -161,6 +161,7 @@ class Beatmap(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     beatmapset_id: Mapped[int] = mapped_column(ForeignKey("beatmapsets.id"), index=True)
     version: Mapped[str] = mapped_column(String(256))
+    checksum: Mapped[str | None] = mapped_column(String(32), nullable=True, index=True)  # md5 of the .osu file
     stars: Mapped[float] = mapped_column(Float, index=True)  # mirror's (current) star rating
     ar: Mapped[float] = mapped_column(Float)
     cs: Mapped[float] = mapped_column(Float)
@@ -628,7 +629,7 @@ class MatchDraft(Base):
 
 
 class RealPlay(Base):
-    """A play made by hand in the local osu!stable client, read from its scores.db (see stable_files)."""
+    """A play made by hand: read from osu!stable's scores.db, or sent by the tycoon client (lazer fork)."""
 
     __tablename__ = "real_plays"
     __table_args__ = (UniqueConstraint("player_id", "replay_md5"),)
@@ -656,3 +657,42 @@ class RealPlay(Base):
     imported_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_utcnow)
     # Plays that existed before the first sync are history, not career events.
     baseline: Mapped[bool] = mapped_column(default=False)
+    source: Mapped[str] = mapped_column(String(8), default="stable")  # stable | client
+    status: Mapped[str] = mapped_column(String(8), default="passed")  # passed | failed | quit
+    progress: Mapped[float] = mapped_column(Float, default=1.0)  # share of the map played
+    assist: Mapped[dict] = mapped_column(JSON, default=dict)  # career modifiers applied by the client
+    career_score_id: Mapped[int | None] = mapped_column(Integer, nullable=True)  # the career score it became
+    career_note: Mapped[str] = mapped_column(String(256), default="")  # why it didn't count, if it didn't
+
+
+class AssistSettings(Base):
+    """Per-career tuning of how much the character's stats bend real gameplay in the tycoon client."""
+
+    __tablename__ = "assist_settings"
+
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    scale: Mapped[float] = mapped_column(Float, default=1.0)  # 0 = off, 2 = double effect
+    magnet: Mapped[bool] = mapped_column(default=False)  # cursor pull for strong aim
+
+
+class HandDay(Base):
+    """The day being played by hand in the client: time and training add up until the day is finished."""
+
+    __tablename__ = "hand_days"
+
+    player_id: Mapped[int] = mapped_column(ForeignKey("players.id", ondelete="CASCADE"), primary_key=True)
+    seconds: Mapped[float] = mapped_column(Float, default=0.0)  # including breaks between attempts
+    play_seconds: Mapped[float] = mapped_column(Float, default=0.0)
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    targets: Mapped[dict] = mapped_column(JSON, default=dict)  # sub-stat -> weighted seconds of demand
+    challenge_time: Mapped[float] = mapped_column(Float, default=0.0)
+    strain_time: Mapped[float] = mapped_column(Float, default=0.0)
+
+
+class ClientLink(Base):
+    """Single row: the career the tycoon client plays for (the profile last opened in the UI)."""
+
+    __tablename__ = "client_link"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    player_id: Mapped[int | None] = mapped_column(ForeignKey("players.id", ondelete="SET NULL"), nullable=True)

@@ -31,6 +31,11 @@ class RealPlayOut(BaseModel):
     pp: float
     played_at: datetime
     baseline: bool
+    source: str
+    status: str
+    progress: float
+    career_score_id: int | None = None
+    career_note: str = ""
 
 
 class SyncOut(BaseModel):

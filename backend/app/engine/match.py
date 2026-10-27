@@ -235,13 +235,16 @@ class MatchState:
         self.log.append({"kind": "result", "side": result.winner, "slot": slot.slot, "score_a": a, "score_b": b})
         return result
 
-    def run(self, play_fn: PlayFn, humans: frozenset[str] | set[str] = frozenset()) -> bool:
-        """Advance until the match ends (True) or a human side has to ban/pick (False)."""
+    def run(self, play_fn: PlayFn, humans: frozenset[str] | set[str] = frozenset(), stop_at_play: bool = False) -> bool:
+        """Advance until the match ends (True) or a human side has to ban/pick (False). With `stop_at_play` it also
+        pauses before each chosen map is played, for maps the user plays by hand in the client."""
         while True:
             kind, side = self.actor()
             if kind == "done":
                 return True
             if kind in ("ban", "pick") and side in humans:
+                return False
+            if kind == "play" and stop_at_play:
                 return False
             if kind == "play":
                 self.play(play_fn)

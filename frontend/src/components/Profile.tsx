@@ -32,6 +32,8 @@ import { LifePanel } from './LifePanel'
 import { PlayPanel, SessionQueue } from './PlayPanel'
 import { QuickSession } from './QuickSession'
 import { usePersisted } from '../usePersisted'
+import { AssistPanel } from './AssistPanel'
+import { HandDayPanel } from './HandDayPanel'
 import { RealPlaysPanel } from './RealPlaysPanel'
 import { ScoreForm } from './ScoreForm'
 import { SessionResults } from './SessionResults'
@@ -47,10 +49,11 @@ import { WorldPanel } from './WorldPanel'
 import { NotificationCenter } from './NotificationCenter'
 import { QuickActions } from './QuickActions'
 
-type Tab = 'profile' | 'training' | 'beatmaps' | 'tournaments' | 'world' | 'chat' | 'social' | 'story' | 'team' | 'life' | 'legacy'
+type Tab = 'profile' | 'training' | 'beatmaps' | 'client' | 'tournaments' | 'world' | 'chat' | 'social' | 'story' | 'team' | 'life' | 'legacy'
 const TAB_LABEL: Record<Tab, string> = {
   training: t('Training'),
   beatmaps: t('Play'),
+  client: t('Hand play'),
   profile: t('Profile'),
   tournaments: t('Tournaments'),
   world: t('World'),
@@ -62,7 +65,7 @@ const TAB_LABEL: Record<Tab, string> = {
   legacy: t('Legacy'),
 }
 const GROUPS: { key: string; label: string; icon: string; tabs: Tab[] }[] = [
-  { key: 'career', label: t('Career'), icon: '🎯', tabs: ['training', 'beatmaps'] },
+  { key: 'career', label: t('Career'), icon: '🎯', tabs: ['training', 'beatmaps', 'client'] },
   { key: 'compete', label: t('Compete'), icon: '🏆', tabs: ['tournaments', 'world'] },
   { key: 'community', label: t('Chat & forum'), icon: '💬', tabs: ['chat', 'social'] },
   { key: 'me', label: t('Me'), icon: '🧑', tabs: ['profile', 'story', 'team', 'life', 'legacy'] },
@@ -120,6 +123,9 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
   const [lastResult, setLastResult] = useState<ScoreSubmitResult | null>(null)
   const [actionLog, setActionLog] = useState<ActionResult[]>([])
   const [tab, setTab] = useState<Tab>('training')
+  useEffect(() => {
+    api.setClientPlayer(playerId).catch(() => {})
+  }, [playerId])
   const [selected, setSelected] = useState<{ beatmap: Beatmap; set: BeatmapSet } | null>(null)
   const [queue, setQueue] = useState<QueuedPlay[]>([])
   const [sessions, setSessions] = useState<
@@ -566,7 +572,6 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
                   />
                 </div>
               )}
-              <RealPlaysPanel playerId={playerId} />
               <details className="rounded-xl bg-panel p-5 text-sm">
                 <summary className="cursor-pointer text-muted">{t('Manual score entry (debug)')}</summary>
                 <div className="mt-4 space-y-4">
@@ -603,6 +608,14 @@ export function Profile({ playerId, onExit }: { playerId: number; onExit: () => 
               country={profile.country}
               onChanged={() => void reload()}
             />
+          )}
+
+          {tab === 'client' && (
+            <div className="space-y-6">
+              <HandDayPanel playerId={playerId} onFinished={() => void reload()} />
+              <AssistPanel playerId={playerId} dateKey={`${profile.in_game_date}:${worldVersion}`} />
+              <RealPlaysPanel playerId={playerId} />
+            </div>
           )}
 
           {tab === 'life' && (

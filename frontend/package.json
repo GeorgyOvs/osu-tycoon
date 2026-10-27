@@ -4,11 +4,14 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
+    "predev": "npm run build:i18n",
     "dev": "vite",
+    "prebuild": "npm run build:i18n",
     "build": "tsc -b && vite build",
     "lint": "oxlint",
     "preview": "vite preview",
-    "test": "vitest run"
+    "test": "vitest run",
+    "build:i18n": "rolldown src/i18n.ts --format esm --platform node --file ../backend/app/i18n/ru.mjs"
   },
   "dependencies": {
     "react": "^19.3.1",

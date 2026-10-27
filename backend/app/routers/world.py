@@ -2,6 +2,7 @@
 
 from dataclasses import asdict
 
+from pydantic import BaseModel, Field
 from fastapi import APIRouter, Depends, HTTPException, Query
 from sqlalchemy import select
 from sqlalchemy.orm import Session
@@ -12,6 +13,7 @@ from app.models import Match, Npc, Player, Tournament, TournamentEntry
 from app.routers.players import get_player_or_404
 from app.schemas import (
     DraftActIn,
+    DraftHandIn,
     DraftOut,
     EntryOut,
     LeaderboardOut,
@@ -36,6 +38,24 @@ def _player_with_world(db: Session, player_id: int) -> Player:
     world_service.ensure_world(db, player)
     db.commit()
     return player
+
+
+class GrowIn(BaseModel):
+    size: int = Field(ge=1, le=world_service.MAX_WORLD_SIZE)
+
+
+@router.get("/world/size")
+def get_world_size(player_id: int, db: Session = Depends(get_db)) -> dict:
+    return world_service.world_size(db, _player_with_world(db, player_id))
+
+
+@router.post("/world/grow")
+def grow(player_id: int, body: GrowIn, db: Session = Depends(get_db)) -> dict:
+    """More procedural players in this world (up to 10,000); everyone already there stays."""
+    player = _player_with_world(db, player_id)
+    added = world_service.grow_world(db, player, body.size)
+    db.commit()
+    return {"added": added, **world_service.world_size(db, player)}
 
 
 @router.get("/news", response_model=list[NewsOut])
@@ -294,6 +314,19 @@ def draft_auto(player_id: int, tournament_id: int, match_id: int, body: MatchStr
                db: Session = Depends(get_db)) -> DraftOut:
     strategy = {"bans": body.bans, "picks": body.picks} if body and (body.bans or body.picks) else None
     return _draft_call(db, player_id, tournament_id, match_id, lambda d, p, t, m: d.auto(db, p, t, m, strategy))
+
+
+@router.post("/tournaments/{tournament_id}/matches/{match_id}/draft/hand", response_model=DraftOut)
+def draft_hand(player_id: int, tournament_id: int, match_id: int, body: DraftHandIn,
+               db: Session = Depends(get_db)) -> DraftOut:
+    """Play the chosen maps yourself in the tycoon client (on), or let the simulation play them (off)."""
+    return _draft_call(db, player_id, tournament_id, match_id, lambda d, p, t, m: d.set_hand(db, p, t, m, body.on))
+
+
+@router.post("/tournaments/{tournament_id}/matches/{match_id}/draft/simulate-map", response_model=DraftOut)
+def draft_simulate_map(player_id: int, tournament_id: int, match_id: int, db: Session = Depends(get_db)) -> DraftOut:
+    """Leave the map waiting to be played by hand to the simulation."""
+    return _draft_call(db, player_id, tournament_id, match_id, lambda d, p, t, m: d.simulate_pending(db, p, t, m))
 
 
 @router.post("/tournaments/{tournament_id}/matches/{match_id}/draft/warmup", response_model=DraftOut)

@@ -200,3 +200,83 @@ def test_unloadable_maps_are_skipped_not_fatal(client, monkeypatch):
     assert len(resp.json()["plays"]) == 1
     only_bad = client.post(f"/api/players/{pid}/sessions", json={"plays": [{"beatmap_id": 424242}]})
     assert only_bad.status_code == 404
+
+
+def _slider_osu() -> str:
+    """Two-span sliders with one tick per span (ticks and repeats: 3 per slider), jumping across the field."""
+    header = make_osu_file(1, 1, n_circles=0)
+    objects = []
+    for i in range(120):
+        x, y = (64, 96) if i % 2 == 0 else (300, 288)
+        objects.append(f"{x},{y},{1000 + i * 1667},{6 if i == 0 else 2},0,L|{x + 200}:{y},2,280")
+    return header + "\n".join(objects) + "\n"
+
+
+@pytest.fixture(scope="module")
+def slider_map():
+    return analyze(_slider_osu().encode())
+
+
+def test_slider_parts_count_ticks_and_repeats(slider_map, jump_map):
+    assert all(o.slider_parts == 3 for o in slider_map.objects)
+    assert all(o.slider_parts == 0 for o in jump_map.objects)
+
+
+def test_sliders_break_and_lose_ends(slider_map):
+    attempts = [run(slider_map, skills(8), mods="NF", seed=f"sb{k}") for k in range(20)]
+    assert sum(a.sliderbreaks for a in attempts) > 0
+    assert sum(a.trace.slider.count("e") for a in attempts) > 0
+    for a in attempts:
+        for i, s in enumerate(a.trace.slider):
+            if s:
+                assert a.trace.points[i] == 100 and not a.trace.cause[i]  # the head was hit
+            if s == "b":
+                assert a.trace.combo[i] == 0
+            if s == "e" and i:
+                assert a.trace.combo[i] == a.trace.combo[i - 1] + 1
+        if a.misses == 0 and a.sliderbreaks:
+            assert a.max_combo < slider_map.max_combo and "Full combo!" not in a.key_moments
+
+
+def _clustered(attempts) -> float:
+    near = total = 0
+    for a in attempts:
+        idx = [i for i, c in enumerate(a.trace.cause) if c]
+        total += len(idx)
+        near += sum(1 for x, y in zip(idx, idx[1:]) if y - x <= 3)
+    return near / max(1, total)
+
+
+def test_one_miss_shakes_the_next_notes(jump_map, monkeypatch):
+    level = skills(42)
+    shaken = [run(jump_map, level, mods="NF", seed=f"c{k}") for k in range(30)]
+    monkeypatch.setattr(play, "SHAKE_BASE", 0.0)
+    monkeypatch.setattr(play, "SHAKE_NERVES", 0.0)
+    calm = [run(jump_map, level, mods="NF", seed=f"c{k}") for k in range(30)]
+    assert sum(a.misses for a in calm) > 10
+    assert _clustered(shaken) > _clustered(calm)
+
+
+def test_restarts_an_attempt_that_broke_early(jump_map):
+    weak = skills(30)
+    for k in range(200):
+        a = run(jump_map, weak, mods="NF", seed=f"r{k}")
+        cut = play.restart_early(a, jump_map, random.Random(k))
+        if cut is not a:
+            break
+    else:
+        pytest.fail("never restarted")
+    assert cut.restarted and not cut.passed and cut.grade == "F"
+    assert cut.fail_progress < play.RESTART_WITHIN + 0.05
+    assert len(cut.trace.points) == cut.fail_index + 1
+    assert cut.n300 + cut.n100 + cut.n50 + cut.misses == len(jump_map.objects)
+    assert cut.key_moments[0].startswith("Restarted at")
+
+    clean = run(jump_map, skills(100), seed="clean")
+    assert play.restart_early(clean, jump_map, random.Random(1)) is clean
+
+
+def test_the_first_minutes_are_stiff():
+    assert play.warmup(0) == pytest.approx(1 - play.WARMUP_COLD)
+    assert play.warmup(0) < play.warmup(0.25) < play.warmup(1) < 1
+    assert play.warmup(1) > 0.99

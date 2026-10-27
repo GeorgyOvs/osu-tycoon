@@ -19,13 +19,16 @@ from app.services import mirror
 
 log = logging.getLogger(__name__)
 
-SYNC_STATUSES = (mirror.STATUS_RANKED, mirror.STATUS_APPROVED)
+SYNC_STATUSES = (mirror.STATUS_RANKED, mirror.STATUS_APPROVED, mirror.STATUS_LOVED)
+PP_SYNC_STATUSES = (mirror.STATUS_RANKED, mirror.STATUS_APPROVED)
+# Every query that is about pp (sessions, pools, boards, training) must keep to these.
+PP_STATUS_NAMES = tuple(mirror.PP_STATUSES)
 PAGE_DELAY_SECONDS = 0.3  # be polite to the mirror
 
 
 def upsert_set(db: Session, data: mirror.BeatmapSetData) -> BeatmapSet | None:
-    """Store a set and its osu!standard difficulties. Skips sets that can't be played for PP."""
-    if data.ranked_date is None or not data.beatmaps or data.status not in mirror.PP_STATUSES:
+    """Store a set and its osu!standard difficulties: ranked/approved (pp) and loved (no pp). Skips the rest."""
+    if data.ranked_date is None or not data.beatmaps or data.status not in mirror.INDEXED_STATUSES:
         return None
 
     bset = db.get(BeatmapSet, data.id)
@@ -60,6 +63,8 @@ def upsert_set(db: Session, data: mirror.BeatmapSetData) -> BeatmapSet | None:
         b.count_sliders = bd.count_sliders
         b.play_count = bd.play_count
         b.pass_count = bd.pass_count
+        if bd.checksum:
+            b.checksum = bd.checksum
     return bset
 
 
@@ -73,9 +78,9 @@ def _state(db: Session, status: int) -> SyncState:
 
 
 def synced_until(db: Session) -> date | None:
-    """Every ranked/approved set up to this date is in the index."""
+    """Every ranked/approved set up to this date is in the index (loved maps don't hold it back)."""
     dates = []
-    for status in SYNC_STATUSES:
+    for status in PP_SYNC_STATUSES:
         state = db.get(SyncState, status)
         if state is None or state.last_ranked_date is None:
             if state is not None and state.exhausted:
@@ -248,7 +253,7 @@ def check_playable(db: Session, in_game_date: date, beatmap_id: int) -> BeatmapS
         bset, status = lookup_set_for_beatmap(db, default_client(), beatmap_id)
     except mirror.MirrorError as e:
         raise NotPlayable(502, f"couldn't check beatmap status: {e}") from e
-    if bset is None:
+    if bset is None or bset.status not in PP_STATUS_NAMES:
         if status is None:
             raise NotPlayable(404, f"beatmap {beatmap_id} not found")
         raise NotPlayable(422, f"beatmap is {status}: only ranked and approved maps give pp")
@@ -274,6 +279,7 @@ def search(
     sort: str = "ranked_desc",
     limit: int = 30,
     offset: int = 0,
+    include_loved: bool = False,
 ) -> tuple[int, list[tuple[BeatmapSet, list[Beatmap]]]]:
     """Sets ranked on or before `before`, with only the difficulties matching the star range."""
     diff_filters = [Beatmap.beatmapset_id == BeatmapSet.id]
@@ -283,6 +289,8 @@ def search(
         diff_filters.append(Beatmap.stars <= max_stars)
 
     set_filters = [BeatmapSet.ranked_date <= before]
+    if not include_loved:
+        set_filters.append(BeatmapSet.status.in_(PP_STATUS_NAMES))
     for token in query.split():
         like = f"%{token}%"
         set_filters.append(

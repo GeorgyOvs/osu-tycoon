@@ -149,6 +149,42 @@ export interface RealPlay {
   pp: number
   played_at: string
   baseline: boolean
+  source: 'stable' | 'client'
+  status: 'passed' | 'failed' | 'quit'
+  progress: number
+  career_score_id: number | null
+  career_note: string
+}
+
+export interface HandDay {
+  hours: number
+  attempts: number
+  limit_hours: number
+  blocked: string | null
+}
+
+export interface FinishedHandDay {
+  start_date: string
+  end_date: string
+  events: { date: string; type: string; message: string }[]
+  news: string[]
+}
+
+export interface AssistSettings {
+  scale: number
+  magnet: boolean
+  assist: {
+    od_delta: number
+    cs_delta: number
+    ar_delta: number
+    hp_delta: number
+    magnet: number
+    condition: number
+    timing: number
+    aim: number
+    reading: number
+    physical: number
+  }
 }
 
 export interface RealSync {
@@ -221,8 +257,35 @@ export async function request<T>(path: string, init?: RequestInit): Promise<T> {
   return resp.status === 204 ? (undefined as T) : resp.json()
 }
 
+export interface BackupCareer {
+  id: number
+  name: string
+  country: string
+  date: string
+  pp: number
+}
+
+export interface BackupManifest {
+  exported_at?: string
+  schema_version?: number
+  careers: BackupCareer[]
+}
+
+export interface BackupImportResult {
+  careers: BackupCareer[]
+  exported_at?: string
+  backup: string
+}
+
+/** Where the browser downloads an export: everything, or one career. */
+export const exportUrl = (playerId?: number) => `/api/backup/export${playerId != null ? `?player_id=${playerId}` : ''}`
+
 export const api = {
   listPlayers: () => request<Player[]>('/api/players'),
+  inspectBackup: (file: Blob) =>
+    request<BackupManifest>('/api/backup/inspect', { method: 'POST', body: file, headers: { 'Content-Type': 'application/zip' } }),
+  importBackup: (file: Blob) =>
+    request<BackupImportResult>('/api/backup/import', { method: 'POST', body: file, headers: { 'Content-Type': 'application/zip' } }),
   getPlayer: (id: number) => request<PlayerProfile>(`/api/players/${id}`),
   creationOptions: () => request<CharacterOptions>('/api/players/creation-options'),
   createPlayer: (body: { name: string; country: string; start_date: string; age?: number; gender?: string; preset?: string; perks?: string[]; unbalanced?: boolean; scenario?: string; hardcore?: boolean; realistic_economy?: boolean }) =>
@@ -238,6 +301,17 @@ export const api = {
     }),
   syncRealPlays: (playerId: number) =>
     request<RealSync>(`/api/players/${playerId}/real/sync`, { method: 'POST' }),
+  setClientPlayer: (playerId: number) =>
+    request<{ player_id: number | null; name: string | null }>('/api/client/active-player', {
+      method: 'PUT',
+      body: JSON.stringify({ player_id: playerId }),
+    }),
+  getAssist: (playerId: number) => request<AssistSettings>(`/api/players/${playerId}/assist`),
+  setAssist: (playerId: number, body: { scale: number; magnet: boolean }) =>
+    request<AssistSettings>(`/api/players/${playerId}/assist`, { method: 'PUT', body: JSON.stringify(body) }),
+  getHandDay: (playerId: number) => request<HandDay>(`/api/players/${playerId}/hand-day`),
+  finishHandDay: (playerId: number) =>
+    request<FinishedHandDay>(`/api/players/${playerId}/hand-day/finish`, { method: 'POST' }),
   listRealPlays: (playerId: number) => request<RealPlay[]>(`/api/players/${playerId}/real?limit=20`),
   listDrills: (playerId: number) => request<Drill[]>(`/api/players/${playerId}/drills`),
   train: (playerId: number, body: { drill: string; hours_per_day: number; days: number }) =>

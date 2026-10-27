@@ -14,18 +14,24 @@ MAX_MOMENTS = 14
 
 @dataclass
 class Trace:
-    """One entry per object reached: combo after it, hp after it, points (0/50/100/300), miss cause or ''."""
+    """One entry per object reached: combo after it, hp after it, points (0/50/100/300), miss cause or '',
+    signed timing error in real ms (0 when the object was never timed: spinners, aim misses), and for sliders
+    whose head was hit: 'b' broken on a tick or repeat, 'e' end dropped, '' otherwise."""
 
     combo: list[int] = field(default_factory=list)
     hp: list[float] = field(default_factory=list)
     points: list[int] = field(default_factory=list)
     cause: list[str] = field(default_factory=list)
+    error: list[float] = field(default_factory=list)
+    slider: list[str] = field(default_factory=list)
 
-    def add(self, combo: int, hp: float, points: int, cause: str = "") -> None:
+    def add(self, combo: int, hp: float, points: int, cause: str = "", error: float = 0.0, slider: str = "") -> None:
         self.combo.append(combo)
         self.hp.append(max(0.0, min(1.0, hp)))
         self.points.append(points)
         self.cause.append(cause)
+        self.error.append(error)
+        self.slider.append(slider)
 
 
 def _kind(o: HitObject) -> str:

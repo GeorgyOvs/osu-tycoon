@@ -33,6 +33,7 @@ class HitObject:
     velocity: float = 0.0  # px per real ms from the previous object
     sharp_angle: bool = False
     complex_rhythm: bool = False
+    slider_parts: int = 0  # ticks and repeats between a slider's head and tail: where a sliderbreak can happen
 
 
 @dataclass
@@ -106,7 +107,8 @@ def _beat_at(red: list[tuple[float, float]], t: float) -> float:
     return beat
 
 
-def _parse_objects(lines: list[str]) -> list[tuple[float, str, float, float]]:
+def _parse_objects(lines: list[str]) -> list[tuple[float, str, float, float, int, float]]:
+    """(time, kind, x, y, slides, pixel length); slides and length are only meaningful for sliders."""
     objs = []
     for line in lines:
         parts = line.split(",")
@@ -117,9 +119,56 @@ def _parse_objects(lines: list[str]) -> list[tuple[float, str, float, float]]:
         except ValueError:
             continue
         kind = "spinner" if typ & 8 else "slider" if typ & 2 else "circle"
-        objs.append((t, kind, x, y))
+        slides, length = 1, 0.0
+        if kind == "slider" and len(parts) > 7:
+            try:
+                slides, length = max(1, int(parts[6])), max(0.0, float(parts[7]))
+            except ValueError:
+                pass
+        objs.append((t, kind, x, y, slides, length))
     objs.sort(key=lambda o: o[0])
     return objs
+
+
+def _slider_velocities(lines: list[str]) -> list[tuple[float, float]]:
+    """(time, SV multiplier) for every timing line; a red line resets SV to 1."""
+    out = []
+    for line in lines:
+        parts = line.split(",")
+        if len(parts) < 2:
+            continue
+        try:
+            t, beat = float(parts[0]), float(parts[1])
+        except ValueError:
+            continue
+        uninherited = parts[6].strip() == "1" if len(parts) > 6 else beat > 0
+        out.append((t, 1.0 if uninherited or beat >= 0 else max(0.1, min(10.0, -100.0 / beat))))
+    out.sort(key=lambda p: p[0])
+    return out
+
+
+def _value_at(points: list[tuple[float, float]], t: float, default: float) -> float:
+    value = points[0][1] if points else default
+    for start, v in points:
+        if start > t:
+            break
+        value = v
+    return value
+
+
+def _slider_parts(t: float, slides: int, length: float, red, sv, multiplier: float, tick_rate: float) -> int:
+    """Ticks and repeats the way lazer lays them out: a tick every tick distance along each span, none in the
+    last 10 ms of a span."""
+    scoring = 100 * multiplier * _value_at(sv, t, 1.0)
+    velocity = scoring / max(1.0, _beat_at(red, t))  # px per beatmap ms
+    tick_distance = scoring / max(0.1, tick_rate)
+    ticks = 0
+    if tick_distance > 0:
+        d = tick_distance
+        while d < length - velocity * 10 and ticks < 64:
+            ticks += 1
+            d += tick_distance
+    return (slides - 1) + slides * ticks
 
 
 def _normalized(strains: list[float], difficulty: float) -> list[float]:
@@ -143,6 +192,16 @@ def analyze(osu_file: bytes, mods: str = "") -> MapProfile:
     sections = _sections(content)
     red, sv = _parse_timing(sections.get("TimingPoints", []))
     raw_objects = _parse_objects(sections.get("HitObjects", []))
+    velocities = _slider_velocities(sections.get("TimingPoints", []))
+    difficulty = dict(line.split(":", 1) for line in sections.get("Difficulty", []) if ":" in line)
+
+    def number(key: str, default: float) -> float:
+        try:
+            return float(difficulty.get(key, default))
+        except ValueError:
+            return default
+
+    slider_multiplier, tick_rate = number("SliderMultiplier", 1.4), number("SliderTickRate", 1.0)
 
     aim_curve = _normalized(strains.aim or [], attrs.aim or 0.0)
     speed_curve = _normalized(strains.speed or [], attrs.speed or 0.0)
@@ -150,10 +209,12 @@ def analyze(osu_file: bytes, mods: str = "") -> MapProfile:
 
     objects: list[HitObject] = []
     first_section = math.floor(raw_objects[0][0] / clock / section_len) if raw_objects else 0
-    for i, (t_map, kind, x, y) in enumerate(raw_objects):
+    for i, (t_map, kind, x, y, slides, length) in enumerate(raw_objects):
         t = t_map / clock
         idx = math.floor(t / section_len) - first_section
         obj = HitObject(time=t, kind=kind, x=x, y=y)
+        if kind == "slider":
+            obj.slider_parts = _slider_parts(t_map, slides, length, red, velocities, slider_multiplier, tick_rate)
         if aim_curve:
             obj.aim_demand = aim_curve[max(0, min(idx, len(aim_curve) - 1))]
         if speed_curve:

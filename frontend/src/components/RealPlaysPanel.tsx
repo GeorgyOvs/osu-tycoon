@@ -1,8 +1,11 @@
 import { useCallback, useEffect, useState } from 'react'
 import { api, type RealPlay } from '../api'
-import { t } from '../i18n'
+import { t, tx } from '../i18n'
 
-/** Hand-played osu!stable scores, pulled from the local client files on demand. */
+/**
+ * Hand-played scores: osu!stable ones are pulled from its files on demand, tycoon-client ones arrive by
+ * themselves, so the list refreshes periodically.
+ */
 export function RealPlaysPanel({ playerId }: { playerId: number }) {
   const [plays, setPlays] = useState<RealPlay[]>([])
   const [note, setNote] = useState<string | null>(null)
@@ -12,7 +15,9 @@ export function RealPlaysPanel({ playerId }: { playerId: number }) {
   const load = useCallback(() => api.listRealPlays(playerId).then(setPlays).catch(() => setPlays([])), [playerId])
   useEffect(() => {
     load()
-  }, [load])
+    const timer = window.setInterval(load, 10_000)
+    return () => window.clearInterval(timer)
+  }, [playerId, load])
 
   const sync = async () => {
     setBusy(true)
@@ -37,7 +42,7 @@ export function RealPlaysPanel({ playerId }: { playerId: number }) {
   return (
     <section className="space-y-3 rounded-xl bg-panel p-5">
       <div className="flex items-center justify-between gap-3">
-        <h2 className="text-sm uppercase tracking-wider text-muted">{t('Plays from osu! client')}</h2>
+        <h2 className="text-sm uppercase tracking-wider text-muted">{t('Played by hand')}</h2>
         <button
           onClick={sync}
           disabled={busy}
@@ -52,10 +57,16 @@ export function RealPlaysPanel({ playerId }: { playerId: number }) {
         {plays.map((p) => (
           <li key={p.id} className="flex justify-between gap-3">
             <span className="truncate">
+              <span className="mr-2 text-xs text-muted">{p.source === 'client' ? t('client') : 'stable'}</span>
               {p.artist} - {p.title} [{p.difficulty_name}] {p.mods && `+${p.mods}`}
             </span>
-            <span className="shrink-0 text-muted">
-              {p.accuracy.toFixed(2)}% · {p.misses}x · {p.pp.toFixed(0)}pp
+            <span
+              className={`shrink-0 ${p.career_score_id ? 'text-white' : 'text-muted'}`}
+              title={p.career_note ? tx(p.career_note) : p.career_score_id ? t('Counted in the career') : undefined}
+            >
+              {p.status === 'passed'
+                ? `${p.accuracy.toFixed(2)}% · ${p.misses}x · ${p.pp.toFixed(0)}pp`
+                : `${p.status === 'failed' ? t('failed') : t('quit')} ${Math.round(p.progress * 100)}%`}
             </span>
           </li>
         ))}

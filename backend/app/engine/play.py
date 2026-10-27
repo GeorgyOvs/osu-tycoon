@@ -5,6 +5,10 @@ or reading) and turns demand / capability into a miss probability. Hits get a ti
 drawn from the player's accuracy against the OD windows. An HP bar decides fails (unless
 NF), nerves can choke a long combo, and long maps drain endurance. A single bad section
 can sink an otherwise easy map, which is exactly what happens to real players.
+
+Mistakes come in clusters: a miss shakes the player for the next notes (more for weak nerves),
+so one miss easily turns into three. Sliders can also break (a tick or repeat dropped: combo
+gone, a 100) or lose their end (a 100, combo kept) while the head was hit fine.
 """
 
 import math
@@ -24,7 +28,11 @@ ATTEMPT_SIGMA = 0.06  # some attempts just go better than others
 # lapses (heavy tail) so even easy maps aren't automatic SSes.
 TIMING_SIGMA_BASE, TIMING_SIGMA_PER_POINT = 28.0, 0.16
 LAPSE_P, LAPSE_SIGMA_MULT = 0.03, 3.0
-PANIC_OBJECTS, PANIC_PENALTY = 3, 0.08  # after a miss the next notes are harder
+# After a miss the hands shake: demand is multiplied by 1 + shake, which fades note by note.
+SHAKE_BASE, SHAKE_NERVES, SHAKE_DECAY, SHAKE_CAP = 0.035, 0.05, 0.8, 0.22
+# Of the slider heads that were hit, this share of the miss chance breaks the slider instead / drops its end.
+SLIDERBREAK_SHARE, SLIDER_END_SHARE = 0.45, 0.3
+SLIDER_END_FLOOR = 0.002  # sloppy players let go of slider ends even on easy maps
 CHOKE_BASE = 0.00003
 JUMP_SPACING_PX = 110.0  # closer than this inside a stream = flow, not snap
 TIMELINE_BUCKETS = 40
@@ -45,6 +53,7 @@ class DayModifiers:
     block_bucket: int | None = None  # mindlock: slice of the timeline where the player tenses up
     block_severity: float = 0.0
     mastery: float = 0.0  # 0..1 hundreds of attempts: the map is learned by heart (slow to build, slow to fade)
+    timing_bias: float = 0.0  # real ms; the player's habit of hitting early (negative) or late (see playstyle)
 
     def capability(self, tilt_resilience: float) -> float:
         factor = math.exp(0.035 * self.form)
@@ -86,6 +95,8 @@ class Attempt:
     trace: Trace | None = None
     fail_index: int | None = None
     choke_note: tuple | None = None
+    sliderbreaks: int = 0
+    restarted: bool = False
 
     def replay(self, profile: MapProfile) -> dict:
         """Columnar replay data (built on demand from the recorded trace; no randomness)."""
@@ -220,7 +231,9 @@ def simulate(
 
     n300 = n100 = n50 = misses = 0
     combo = best_run = 0
-    panic = 0
+    shake = 0.0
+    shake_step = SHAKE_BASE + SHAKE_NERVES * (1 - min(nerve, 100) / 100)
+    sliderbreaks = 0
     choked = False
     choke_note = None
     causes: dict[str, int] = {}
@@ -271,13 +284,14 @@ def simulate(
         for k, v in dims.items():
             peaks[k] = max(peaks[k], v)
         peaks["stamina"] = max(peaks["stamina"], stamina)
-        if panic:
-            r += PANIC_PENALTY
-            panic -= 1
+        r *= 1 + shake
+        shake *= SHAKE_DECAY
 
         p_miss = MISS_FLOOR + 1 / (1 + math.exp(-(r - MISS_CENTER) / MISS_WIDTH))
         missed = rng.random() < p_miss
         points = 0
+        signed_err = 0.0
+        slider = ""
 
         if not missed and combo > 100:
             # Nerves: the longer the combo and the closer the end, the shakier the hands.
@@ -291,10 +305,11 @@ def simulate(
 
         if not missed:
             # Timing: |error| against the OD windows; slider heads only need the 50 window.
-            sigma = (TIMING_SIGMA_BASE - TIMING_SIGMA_PER_POINT * ratios.acc_skill) * (0.7 + 0.4 * min(r, 1.5)) / factor
+            sigma = (TIMING_SIGMA_BASE - TIMING_SIGMA_PER_POINT * ratios.acc_skill) * (0.7 + 0.4 * min(r, 1.5)) / factor * (1 + shake)
             if rng.random() < LAPSE_P * (1 - min(ratios.acc_skill, 115) / 150):
                 sigma *= LAPSE_SIGMA_MULT
-            err = abs(rng.gauss(0, max(4.0, sigma)))
+            signed_err = rng.gauss(day.timing_bias, max(4.0, sigma))
+            err = abs(signed_err)
             if o.kind == "slider":
                 result = 300 if err <= profile.meh_window else 0
             elif err <= profile.great_window:
@@ -307,16 +322,29 @@ def simulate(
                 result = 0
                 cause = "accuracy"
             missed = result == 0
+            if not missed and o.kind == "slider":
+                roll = rng.random()
+                if o.slider_parts and roll < SLIDERBREAK_SHARE * p_miss:
+                    slider, result = "b", 100  # the head was fine, the cursor slipped off on a tick or repeat
+                elif roll < (SLIDERBREAK_SHARE + SLIDER_END_SHARE) * p_miss + SLIDER_END_FLOOR * (1 - min(ratios.acc_skill, 115) / 115):
+                    slider, result = "e", 100
 
         if missed:
             misses += 1
             combo = 0
-            panic = PANIC_OBJECTS
+            shake = min(SHAKE_CAP, shake + shake_step)
             hp -= miss_damage
             causes[cause] = causes.get(cause, 0) + 1
             bucket.misses += 1
             recent_causes.append((cause, o))
             recent_causes = recent_causes[-20:]
+        elif slider == "b":
+            sliderbreaks += 1
+            combo = 0
+            shake = min(SHAKE_CAP, shake + shake_step / 2)
+            hp -= miss_damage / 2
+            points = result
+            n100 += 1
         else:
             combo += 1
             best_run = max(best_run, combo)
@@ -332,7 +360,7 @@ def simulate(
             hp = min(1.0, hp)
 
         bucket.hp_min = min(bucket.hp_min, max(0.0, hp))
-        trace.add(combo, hp, points, cause if missed else "")
+        trace.add(combo, hp, points, cause if missed else "", signed_err, slider)
         if hp <= 0:
             if no_fail:
                 hp = 0.0
@@ -349,10 +377,14 @@ def simulate(
     accuracy = 100 * (300 * n300 + 100 * n100 + 50 * n50) / (300 * total)
     combo_scale = profile.max_combo / total
     max_combo = min(profile.max_combo, round(best_run * combo_scale))
-    if passed and misses == 0:
+    if passed and misses == 0 and not sliderbreaks:
         max_combo = profile.max_combo
 
     moments = _key_moments(profile, passed, fail_index, choke_note, causes, recent_causes, misses, n300, total)
+    if sliderbreaks >= 2:
+        moments.append(f"{sliderbreaks} sliderbreaks.")
+    elif passed and misses == 0 and sliderbreaks:
+        moments[-1:] = ["A sliderbreak cost the full combo."]
     return Attempt(
         passed=passed,
         fail_progress=None if passed else fail_index / total,
@@ -372,7 +404,47 @@ def simulate(
         trace=trace,
         fail_index=fail_index,
         choke_note=choke_note,
+        sliderbreaks=sliderbreaks,
     )
+
+
+# The first minutes of a day's play are stiff: capability starts this much lower and warms up.
+WARMUP_COLD, WARMUP_HOURS = 0.05, 0.25
+# Grinding a map for a better score, a player quits an attempt whose combo broke early.
+RESTART_WITHIN, RESTART_CHANCE = 0.2, 0.75
+
+
+def warmup(session_hours: float) -> float:
+    return 1 - WARMUP_COLD * math.exp(-session_hours / WARMUP_HOURS)
+
+
+def restart_early(attempt: Attempt, profile: MapProfile, rng: random.Random) -> Attempt:
+    """The attempt as it goes when the player restarts after an early combo break: cut a few notes after the
+    break (the time it takes to hit escape), counted as a failed attempt that far. Unchanged otherwise."""
+    t, n = attempt.trace, len(profile.objects)
+    if t is None:
+        return attempt
+    first = next((i for i in range(len(t.points)) if t.cause[i] or t.slider[i] == "b"), None)
+    if first is None or first >= RESTART_WITHIN * n or rng.random() >= RESTART_CHANCE:
+        return attempt
+    stop = min(len(t.points), first + 1 + rng.randint(1, 4))
+    cut = Trace(t.combo[:stop], t.hp[:stop], t.points[:stop], t.cause[:stop], t.error[:stop], t.slider[:stop])
+    n300, n100, n50 = cut.points.count(300), cut.points.count(100), cut.points.count(50)
+    causes: dict[str, int] = {}
+    for c in cut.cause:
+        if c:
+            causes[c] = causes.get(c, 0) + 1
+    objs = profile.objects
+    index = stop - 1
+    why = "a sliderbreak" if t.slider[first] == "b" else "a miss"
+    return Attempt(
+        passed=False, fail_progress=index / max(1, n), fail_time=(objs[index].time - objs[0].time) / 1000,
+        n300=n300, n100=n100, n50=n50, misses=n - n300 - n100 - n50,
+        max_combo=min(profile.max_combo, round(max(cut.combo, default=0) * profile.max_combo / max(1, n))),
+        accuracy=100 * (300 * n300 + 100 * n100 + 50 * n50) / (300 * max(1, n)), grade="F", choked=False,
+        miss_causes=causes, key_moments=[f"Restarted at {_fmt_time((objs[first].time - objs[0].time) / 1000)} after {why}."],
+        timeline=attempt.timeline, peak_ratios=attempt.peak_ratios, trace=cut, fail_index=index,
+        sliderbreaks=cut.slider.count("b"), restarted=True)
 
 
 CAUSE_TEXT = {
@@ -427,8 +499,13 @@ MOD_SCORE_MULTIPLIERS = {"HD": 1.06, "HR": 1.10, "DT": 1.20, "NC": 1.20, "FL": 1
 
 def score_v2(attempt: Attempt, profile: MapProfile, mods: str) -> int:
     """Tournament score (ScoreV2-like): 70% combo, 30% accuracy^10, times mod multipliers."""
-    combo = (attempt.max_combo / max(1, profile.max_combo)) ** 1.5
-    acc = (attempt.accuracy / 100) ** 10
+    return score_v2_values(attempt.accuracy, attempt.max_combo, profile.max_combo, mods)
+
+
+def score_v2_values(accuracy: float, max_combo: int, map_max_combo: int, mods: str, completion: float = 1.0) -> int:
+    """The same ScoreV2 from plain numbers (a play made by hand); a failed run only scores the part it played."""
+    combo = (max_combo / max(1, map_max_combo)) ** 1.5
+    acc = (accuracy / 100) ** 10 * max(0.0, min(1.0, completion))
     mult = 1.0
     for i in range(0, len(mods), 2):
         mult *= MOD_SCORE_MULTIPLIERS.get(mods[i : i + 2], 1.0)
@@ -465,7 +542,7 @@ def assess(profile: MapProfile, skills: dict[str, float], mods: str, day: DayMod
 
     return Assessment(
         pass_rate=len(passes) / runs,
-        fc_rate=sum(1 for a in passes if a.misses == 0) / runs,
+        fc_rate=sum(1 for a in passes if a.misses == 0 and not a.sliderbreaks) / runs,
         median_accuracy=median([a.accuracy for a in passes]),
         median_misses=median([a.misses for a in passes]),
         peak_ratios=peaks,

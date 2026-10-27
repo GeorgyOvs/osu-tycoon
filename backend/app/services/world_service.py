@@ -7,7 +7,7 @@ from datetime import date
 from functools import lru_cache
 from pathlib import Path
 
-from sqlalchemy import delete, select
+from sqlalchemy import func, delete, select
 from sqlalchemy.orm import Session
 
 from app.engine import attributes as A
@@ -82,19 +82,8 @@ def ensure_world(db: Session, player: Player) -> WorldState:
             story.put(player, "tournament_templates", len(world_data.TOURNAMENTS))
         if not state.population_version:
             existing = list(db.scalars(select(Npc).where(Npc.player_id == player.id)))
-            taken = {n.name.lower() for n in existing}
             count = world.PROCEDURAL_WITH_REAL if any(n.kind == "real" for n in existing) else world.PROCEDURAL_COUNT
-            for c in world.generate_procedural(player.seed, count):
-                if c.name.lower() in taken:
-                    continue
-                n = Npc(player_id=player.id, kind="procedural", name=c.name, country=c.country,
-                        style=c.style, seed=c.seed, join_date=c.join_date, peak=c.peak,
-                        ramp_years=c.ramp_years, prime_years=c.prime_years, decline_per_year=c.decline_per_year)
-                n.deviation, n.form, n.motivation, n.curve_shift_weeks, n.titles = 0.0, 0.0, 70.0, 0, 0
-                world.initialize_development(n)
-                _initial_status(n, state.last_tick)
-                db.add(n)
-                taken.add(n.name.lower())
+            _add_procedural(db, player, state, world.generate_procedural(player.seed, count), existing)
             state.population_version = 1
             db.flush()
         return state
@@ -133,6 +122,58 @@ def ensure_world(db: Session, player: Player) -> WorldState:
 
     tournaments.generate_through(db, player, state, on.year + 1)
     return state
+
+
+MAX_WORLD_SIZE = 10_000  # procedural players; a month of play stays a few seconds even at this size
+
+
+def _add_procedural(db: Session, player: Player, state: WorldState, careers: list, existing: list[Npc],
+                    limit: int | None = None) -> int:
+    """Add these procedural careers (at most `limit`), placed on their curves as of the world's last tick.
+    Names already in the world (case-insensitive) are skipped. Returns how many joined."""
+    taken = {n.name.lower() for n in existing}
+    added = 0
+    for c in careers:
+        if limit is not None and added >= limit:
+            break
+        if c.name.lower() in taken:
+            continue
+        n = Npc(player_id=player.id, kind="procedural", name=c.name, country=c.country,
+                style=c.style, seed=c.seed, join_date=c.join_date, peak=c.peak,
+                ramp_years=c.ramp_years, prime_years=c.prime_years, decline_per_year=c.decline_per_year)
+        n.deviation, n.form, n.motivation, n.curve_shift_weeks, n.titles = 0.0, 0.0, 70.0, 0, 0
+        world.initialize_development(n)
+        _initial_status(n, state.last_tick)
+        db.add(n)
+        taken.add(n.name.lower())
+        added += 1
+    return added
+
+
+def world_size(db: Session, player: Player) -> dict:
+    """How many procedural players live in this world, and how many are on the ranking today."""
+    procedural = db.scalar(select(func.count()).select_from(Npc).where(
+        Npc.player_id == player.id, Npc.kind == "procedural")) or 0
+    ranked = db.scalar(select(func.count()).select_from(Npc).where(
+        Npc.player_id == player.id, Npc.rank.is_not(None))) or 0
+    return {"procedural": procedural, "ranked": ranked, "max": MAX_WORLD_SIZE}
+
+
+def grow_world(db: Session, player: Player, size: int) -> int:
+    """Add procedural players up to `size`. The generator is prefix-stable, so everyone already in the world stays
+    exactly who they are and the newcomers are the next careers of the same world seed. Returns how many joined."""
+    state = ensure_world(db, player)
+    existing = list(db.scalars(select(Npc).where(Npc.player_id == player.id)))
+    current = sum(1 for n in existing if n.kind == "procedural")
+    target = min(MAX_WORLD_SIZE, size)
+    if target <= current:
+        return 0
+    # Walk the same prefix-stable list from the start: everyone already here is skipped by name, so repeated
+    # growth always continues with the next careers of this world seed. A margin covers skipped name clashes.
+    careers = world.generate_procedural(player.seed, target + target // 5 + 100)
+    added = _add_procedural(db, player, state, careers, existing, limit=target - current)
+    db.flush()
+    return added
 
 
 def _number_one(db: Session, player: Player) -> Npc | None:

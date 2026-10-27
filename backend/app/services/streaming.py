@@ -64,7 +64,7 @@ def apply(db: Session, player: Player, plays, hours: float) -> list[simulation.E
             chat.append(("top_play", {"pp": round(p.recorded.score.pp)}))
             if highlight is None or significance > highlight[1]:
                 highlight = (p, significance)
-        if any(a.attempt.passed and a.attempt.misses == 0 for a in p.attempts):
+        if any(a.attempt.passed and a.attempt.misses == 0 and not a.attempt.sliderbreaks for a in p.attempts):
             boost += 3
             chat.append(("fc", {}))
         if all(not a.attempt.passed for a in p.attempts):

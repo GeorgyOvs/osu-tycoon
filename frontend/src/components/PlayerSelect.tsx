@@ -1,5 +1,5 @@
-import { useEffect, useState, type FormEvent } from 'react'
-import { api, fmt, type Player, type CharacterOptions } from '../api'
+import { useEffect, useRef, useState, type ChangeEvent, type FormEvent } from 'react'
+import { api, exportUrl, fmt, type Player, type CharacterOptions } from '../api'
 import { getLang, setLang, t, tx } from '../i18n'
 
 export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
@@ -10,6 +10,9 @@ export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
   const [age, setAge] = useState(15)
   const [gender, setGender] = useState('unspecified')
   const [error, setError] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
+  const [importing, setImporting] = useState(false)
+  const importInput = useRef<HTMLInputElement>(null)
   const [options, setOptions] = useState<CharacterOptions | null>(null)
   const [optionsError, setOptionsError] = useState(false)
   const [preset, setPreset] = useState('random')
@@ -55,6 +58,32 @@ export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
     void reload()
   }
 
+  const importFile = async (e: ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0]
+    e.target.value = ''
+    if (!file) return
+    setError(null)
+    setNotice(null)
+    try {
+      const manifest = await api.inspectBackup(file)
+      const incoming = manifest.careers.map((c) => `${c.name} (${c.date})`).join(', ') || t('no careers')
+      const current = players.map((p) => p.name).join(', ')
+      const question = current
+        ? t('Import {incoming}? It replaces all careers on this device ({current}); a backup of them is kept.', { incoming, current })
+        : t('Import {incoming}?', { incoming })
+      if (!confirm(question)) return
+      setImporting(true)
+      const result = await api.importBackup(file)
+      setNotice(t('Imported: {names}. The previous data was saved as data/backups/{backup}.', {
+        names: result.careers.map((c) => c.name).join(', ') || t('no careers'), backup: result.backup }))
+      void reload()
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setImporting(false)
+    }
+  }
+
   return (
     <div className="mx-auto mt-16 max-w-xl space-y-8 px-4">
       <h1 className="text-center text-4xl font-bold">
@@ -83,6 +112,13 @@ export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
                   {p.in_game_date} · {fmt.pp(p.total_pp)} · {fmt.rank(p.global_rank)}
                 </span>
               </button>
+              <a
+                href={exportUrl(p.id)}
+                title={t('Export this career to a file')}
+                className="rounded-lg bg-panel px-3 py-3 text-muted hover:bg-panel-light hover:text-white"
+              >
+                ⤓
+              </a>
               <button
                 onClick={() => remove(p.id)}
                 title={t('Delete')}
@@ -94,6 +130,29 @@ export function PlayerSelect({ onSelect }: { onSelect: (id: number) => void }) {
           ))}
         </section>
       )}
+
+      <section className="space-y-2">
+        <h2 className="text-sm uppercase tracking-wider text-muted">{t('Move careers between devices')}</h2>
+        <div className="flex flex-wrap gap-2">
+          {players.length > 0 && (
+            <a href={exportUrl()} className="rounded-lg bg-panel px-4 py-2 text-sm hover:bg-panel-light">
+              {t('Export all careers')}
+            </a>
+          )}
+          <button
+            disabled={importing}
+            onClick={() => importInput.current?.click()}
+            className="rounded-lg bg-panel px-4 py-2 text-sm hover:bg-panel-light disabled:opacity-50"
+          >
+            {importing ? t('Importing…') : t('Import from a file')}
+          </button>
+          <input ref={importInput} type="file" accept=".zip,application/zip" onChange={importFile} className="hidden" />
+        </div>
+        <p className="text-xs text-muted">
+          {t('An export holds the careers with everything in them. Importing replaces the careers on this device; the client keeps its own maps and local scores in %APPDATA%\\osu-tycoon.')}
+        </p>
+        {notice && <p className="text-sm text-green-400">{notice}</p>}
+      </section>
 
       <form onSubmit={create} className="space-y-4 rounded-xl bg-panel p-6">
         <h2 className="text-sm uppercase tracking-wider text-muted">{t('New career')}</h2>

@@ -10,7 +10,10 @@ from app.config import MIRROR_API_URL, USER_AGENT
 PAGE_SIZE = 100  # mirror maximum
 STATUS_RANKED = 1
 STATUS_APPROVED = 2
+STATUS_LOVED = 4
 PP_STATUSES = {"ranked": STATUS_RANKED, "approved": STATUS_APPROVED}
+# Loved maps are indexed too (they exist in the world and can be played), they just never give pp.
+INDEXED_STATUSES = {**PP_STATUSES, "loved": STATUS_LOVED}
 
 
 class MirrorError(Exception):
@@ -34,6 +37,7 @@ class BeatmapData:
     count_sliders: int
     play_count: int
     pass_count: int
+    checksum: str | None = None  # md5 of the .osu file, how the client identifies the map
 
 
 @dataclass(frozen=True)
@@ -75,6 +79,7 @@ def parse_beatmap(raw: dict) -> BeatmapData:
         count_sliders=int(raw.get("count_sliders") or 0),
         play_count=int(raw.get("playcount") or 0),
         pass_count=int(raw.get("passcount") or 0),
+        checksum=raw.get("checksum"),
     )
 
 
@@ -139,6 +144,11 @@ class MirrorClient:
     def get_set(self, set_id: int) -> BeatmapSetData | None:
         data = self._get(f"/v2/s/{set_id}")
         return parse_set(data) if data else None
+
+    def get_beatmap_by_md5(self, checksum: str) -> dict | None:
+        """The raw API-v2 beatmap for an .osu file's md5 (how the client identifies its maps), or None."""
+        data = self._get(f"/v2/md5/{checksum}")
+        return data if isinstance(data, dict) and data.get("id") else None
 
     def get_set_for_beatmap(self, beatmap_id: int) -> BeatmapSetData | None:
         data = self._get(f"/v2/b/{beatmap_id}")

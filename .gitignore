@@ -11,3 +11,4 @@ frontend/dist/
 .claude/
 .idea/
 .vscode/
+backend/app/i18n/ru.mjs

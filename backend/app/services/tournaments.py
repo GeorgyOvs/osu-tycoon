@@ -2,6 +2,7 @@
 
 import math
 import random
+import zlib
 from dataclasses import dataclass
 from datetime import date, timedelta
 
@@ -9,10 +10,10 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.engine import attributes as A
-from app.engine import bracket, match, network, play, psychology, simulation, world
+from app.engine import bracket, match, network, play, playstyle, psychology, simulation, world
 from app.engine.world_data import COUNTRIES, TIER_STARS, TOURNAMENTS
 from app.models import Beatmap, BeatmapSet, Match, Npc, Player, Tournament, TournamentEntry, WorldEvent, WorldState
-from app.services import condition, familiarity, media, mindlock, osu_files, pp, ranking, rivals, sessions
+from app.services import beatmap_index, condition, familiarity, media, mindlock, osu_files, pp, ranking, rivals, sessions
 
 REGISTRATION_DAYS = 28
 UNRANKED = 10_000_000
@@ -478,12 +479,25 @@ def process(db: Session, player: Player, today: date) -> list[News]:
             if a is None or b is None or a.includes_user or b.includes_user:
                 continue  # waiting on an earlier match, or the user has to play this one
             rng = random.Random(f"{player.seed}:match:{t.id}:{m.key}")
-            outcome = match.light_match(a.composites, b.composites, _form(db, a), _form(db, b),
-                                        pool_for(t, m.week), m.first_to, rng)
+            pool = pool_for(t, m.week)
+            outcome = match.light_match(a.composites, b.composites, _form(db, a), _form(db, b), pool, m.first_to, rng)
             m.score_a, m.score_b = outcome.score_a, outcome.score_b
+            # Which map was picked by whom and who took it: enough to replay the match note by note when watched.
+            m.maps = light_maps(outcome, pool)
             _finish_match(db, player, t, m, outcome.winner, due_date(t, m.week), out)
     db.flush()
     return out
+
+
+def light_maps(outcome: match.MatchOutcome, pool: list[match.Slot]) -> list[dict]:
+    slots = {s.slot: s for s in pool}
+    out = []
+    for r in outcome.maps:
+        s = slots.get(r.slot)
+        out.append({"slot": r.slot, "picked_by": r.picked_by, "score_a": r.score_a, "score_b": r.score_b,
+                    "winner": r.winner, "beatmap_id": s.beatmap_id if s else None, "title": s.title if s else "",
+                    "mods": (s.mods or "NM") if s else "NM", "stars": s.stars if s else 0, "light": True})
+    return out + [{"bans": outcome.bans}]
 
 
 def forfeit(db: Session, player: Player, t: Tournament, m: Match, reason: str) -> list[News]:
@@ -623,7 +637,8 @@ def fill_slots(db: Session, slots: list[match.Slot], ranked_before: date, rng: r
         lo_len, hi_len = (180, 420) if family == "TB" else (90, 300)
         for window in (0.15, 0.3, 0.6, 1.2):
             q = (select(Beatmap, BeatmapSet).join(BeatmapSet)
-                 .where(BeatmapSet.ranked_date <= ranked_before, Beatmap.stars.between(nm_target - window, nm_target + window),
+                 .where(BeatmapSet.ranked_date <= ranked_before, BeatmapSet.status.in_(beatmap_index.PP_STATUS_NAMES),
+                        Beatmap.stars.between(nm_target - window, nm_target + window),
                         Beatmap.hit_length.between(lo_len, hi_len)))
             if s.slot == "NM3":
                 q = q.where(Beatmap.bpm >= 175)
@@ -658,6 +673,7 @@ class _Competitor:
     day: play.DayModifiers
     seed: int
     npc_id: int | None
+    style_seed: int = 0  # whose hand this is (see playstyle): the NPC's own seed, not the bracket's
 
 
 def _competitors(db: Session, player: Player, e: TournamentEntry) -> list[_Competitor]:
@@ -670,13 +686,15 @@ def _competitors(db: Session, player: Player, e: TournamentEntry) -> list[_Compe
             day = sessions.day_modifiers(player)
             day.morale = player.morale
             out.append(_Competitor(player.name, "user", condition.play_skills(db, player), player.form, day,
-                                   player.seed, None))
+                                   player.seed, None, player.seed))
         else:
             comps = {g: v for g, v in m["composites"].items() if not g.startswith("_")}
             npc = db.get(Npc, m["npc_id"]) if m.get("npc_id") else None
             form = npc.form if npc else 0.0
+            style_seed = npc.seed if npc else zlib.crc32(m["name"].encode())
             out.append(_Competitor(m["name"], m["kind"], world.substats(comps, m.get("seed", 0)), form,
-                                   play.DayModifiers(form=form), m.get("seed", 0), m.get("npc_id")))
+                                   play.DayModifiers(form=form, timing_bias=playstyle.timing_bias(style_seed)),
+                                   m.get("seed", 0), m.get("npc_id"), style_seed))
     if chemistry is not None and e.includes_user:  # a well-drilled team keeps its nerve together
         from app.engine import teams as rules
         for c in out:
@@ -694,10 +712,45 @@ def _side_comps(comps: list[_Competitor]) -> dict[str, float]:
 MATCH_VIEWERS = {"community6": 0, "community": 30, "open": 300, "major": 4000, "owc": 20000, "clan": 150}
 
 
+TRACE_CODES = {300: "3", 100: "1", 50: "5", 0: "0"}
+
+
+def trace_json(attempt, rate: float) -> dict:
+    """Every reached object's result and signed timing error (beatmap ms), compact enough to keep with a match,
+    so the tycoon client can replay it later exactly as it went."""
+    t = attempt.trace
+    out = {"points": "".join(TRACE_CODES[p] for p in t.points), "errors": [round(e * rate) for e in t.error]}
+    sliders = {str(i): s for i, s in enumerate(t.slider) if s}
+    if sliders:
+        out["sliders"] = sliders  # 'b' broken on a tick, 'e' end dropped (the head was hit)
+    return out
+
+
+def cursor_knobs(skills: dict[str, float], day: play.DayModifiers, kind: str, style: dict[str, float] | None = None) -> dict:
+    """0..1 values the client's cursor model uses for this player (see character_play), with their playstyle."""
+    from app.engine import attributes as A
+
+    return (style or {}) | {"aim": round(min(1.0, A.composite(skills, A.GROUPS_BY_KEY["aim"]) / 100), 3),
+            "precision": round(min(1.0, skills["precision"] / 100), 3),
+            "stamina": round(min(1.0, skills["hand_stamina"] / 100), 3),
+            "nerves": round(min(1.0, skills["nerve_resistance"] / 100), 3),
+            "condition": round(day.capability(skills["tilt_resilience"]), 3),
+            "fatigue": round(day.fatigue / 100, 3)}
+
+
+def _style(player: Player, c: "_Competitor", skills: dict[str, float]) -> dict[str, float]:
+    if c.kind == "user":
+        return playstyle.of_player(player, skills)
+    return playstyle.describe(c.style_seed, skills, year=player.in_game_date.year)
+
+
 def map_simulator(db: Session, player: Player, side_a: list["_Competitor"], side_b: list["_Competitor"],
-                  seed_key: str, no_fail: bool = True, opponent_country: str | None = None):
+                  seed_key: str, no_fail: bool = True, opponent_country: str | None = None,
+                  hand_results: dict[str, dict] | None = None):
     """(advantage, play_map) callbacks for match.run_match: every map simulated note by note for
-    everyone on both sides, ScoreV2, pressure on decisive maps, the user's map knowledge."""
+    everyone on both sides, ScoreV2, pressure on decisive maps, the user's map knowledge.
+    `hand_results` (slot -> accuracy/max_combo/misses/passed/completion): maps the user played by hand in the
+    client; there the user's score is the real one and only everyone else is simulated."""
     comps_a, comps_b = _side_comps(side_a), _side_comps(side_b)
     from app.services import setup as setup_service
 
@@ -711,7 +764,9 @@ def map_simulator(db: Session, player: Player, side_a: list["_Competitor"], side
         mods = pp.normalize_mods(s.mods + ("NF" if no_fail else ""))
         prof = sessions.map_profile(s.beatmap_id, mods)
         detail = {"beatmap_id": s.beatmap_id, "title": s.title, "mods": s.mods or "NM", "stars": round(prof.stars, 2),
-                  "players": []}
+                  "players": [],
+                  # Object start times on the beatmap's clock: with each player's trace, enough to replay the map.
+                  "times": [round(o.time * prof.clock_rate) for o in prof.objects]}
         if opponent_country:
             detail["ping_ms"] = ping_ms
             if ping_factor > 1.0:
@@ -736,6 +791,20 @@ def map_simulator(db: Session, player: Player, side_a: list["_Competitor"], side
                     if decisive:
                         day.clutch *= psychology.clutch_factor(player)
                 rng = random.Random(f"{player.seed}:{seed_key}:{s.slot}:{side_name}:{i}")
+                real = (hand_results or {}).get(s.slot) if c.kind == "user" else None
+                if real is not None:
+                    score = play.score_v2_values(real["accuracy"], real["max_combo"], prof.max_combo, s.mods,
+                                                 real.get("completion", 1.0))
+                    total += score
+                    psychology.record_attempt(player, fam, real["passed"], False, real["misses"], today)
+                    detail["players"].append({
+                        "side": side_name, "name": c.name, "kind": c.kind, "score": score, "hand": True, "npc_id": None,
+                        "knobs": cursor_knobs(skills, day, c.kind, _style(player, c, skills)),
+                        "accuracy": round(real["accuracy"], 2), "misses": real["misses"], "combo": real["max_combo"],
+                        "max_combo": prof.max_combo, "choked": False, "key_moments": [], "passed": real["passed"],
+                        "grade": "",
+                    })
+                    continue
                 if c.kind == "user":
                     block = mindlock.current(db, player, s.beatmap_id, day.mastery)
                     day.block_bucket, day.block_severity = block if block else (None, 0.0)
@@ -752,10 +821,11 @@ def map_simulator(db: Session, player: Player, side_a: list["_Competitor"], side
                 score = play.score_v2(attempt, prof, s.mods)
                 total += score
                 detail["players"].append({
-                    "side": side_name, "name": c.name, "kind": c.kind, "score": score,
+                    "side": side_name, "name": c.name, "kind": c.kind, "score": score, "npc_id": c.npc_id,
                     "accuracy": round(attempt.accuracy, 2), "misses": attempt.misses, "combo": attempt.max_combo,
                     "max_combo": prof.max_combo, "choked": attempt.choked, "key_moments": attempt.key_moments,
                     "passed": attempt.passed, "grade": attempt.grade, "replay": attempt.replay(prof),
+                    "trace": trace_json(attempt, prof.clock_rate), "knobs": cursor_knobs(skills, day, c.kind, _style(player, c, skills)),
                 })
             totals.append(total)
         if decisive:
@@ -777,7 +847,7 @@ def assert_playable(db: Session, player: Player, t: Tournament, m: Match) -> Non
         raise TournamentError(409, f"this match is scheduled for {due_date(t, m.week)}")
 
 
-def user_match_context(db: Session, player: Player, t: Tournament, m: Match):
+def user_match_context(db: Session, player: Player, t: Tournament, m: Match, hand_results: dict | None = None):
     """Everything both the one-click match and the interactive draft need: pool, entries, competitors and the
     advantage/play callbacks of the note-by-note simulation."""
     pool = _validate_pool(db, t, m.week)
@@ -785,7 +855,7 @@ def user_match_context(db: Session, player: Player, t: Tournament, m: Match):
     side_a, side_b = _competitors(db, player, a), _competitors(db, player, b)
     opponent_entry = b if a.includes_user else a
     advantage, play_map = map_simulator(db, player, side_a, side_b, seed_key=f"{m.id}",
-                                        opponent_country=opponent_entry.country)
+                                        opponent_country=opponent_entry.country, hand_results=hand_results)
     return pool, a, b, side_a, side_b, advantage, play_map
 
 

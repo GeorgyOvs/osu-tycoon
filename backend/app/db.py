@@ -36,8 +36,23 @@ def get_db() -> Iterator[Session]:
 
 # Bump on every schema change. UPGRADES maps an old version to the SQL that brings it one step
 # forward (new tables are created by create_all afterwards); versions missing here need a fresh DB.
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 22
 UPGRADES: dict[int, list[str]] = {
+    21: [
+        "ALTER TABLE beatmaps ADD COLUMN checksum VARCHAR(32)",
+        "CREATE INDEX IF NOT EXISTS ix_beatmaps_checksum ON beatmaps (checksum)",
+    ],
+    20: [
+        "ALTER TABLE real_plays ADD COLUMN career_score_id INTEGER",
+        "ALTER TABLE real_plays ADD COLUMN career_note VARCHAR(256) NOT NULL DEFAULT ''",
+    ],  # + hand_days table (created by create_all)
+    19: [],  # assist_settings table (created by create_all)
+    18: ["ALTER TABLE real_plays ADD COLUMN assist JSON NOT NULL DEFAULT '{}'"],
+    17: [
+        "ALTER TABLE real_plays ADD COLUMN source VARCHAR(8) NOT NULL DEFAULT 'stable'",
+        "ALTER TABLE real_plays ADD COLUMN status VARCHAR(8) NOT NULL DEFAULT 'passed'",
+        "ALTER TABLE real_plays ADD COLUMN progress FLOAT NOT NULL DEFAULT 1.0",
+    ],  # + client_link table (created by create_all)
     16: [],  # real_plays table (created by create_all)
     15: ["ALTER TABLE map_scores ADD COLUMN attempts INTEGER NOT NULL DEFAULT 0"],
     14: ["ALTER TABLE players ADD COLUMN story_state JSON NOT NULL DEFAULT '{}'"],
@@ -79,10 +94,11 @@ UPGRADES: dict[int, list[str]] = {
 }
 
 
-def init_db() -> None:
+def init_db(target=None) -> None:
+    """Create or upgrade the schema of the app's database, or of `target` (an engine) when given."""
     from app import models  # noqa: F401  (register tables)
 
-    with engine.begin() as conn:
+    with (target or engine).begin() as conn:
         version = conn.exec_driver_sql("PRAGMA user_version").scalar()
         has_tables = bool(inspect(conn).get_table_names())
         if has_tables and version != SCHEMA_VERSION:
@@ -91,8 +107,12 @@ def init_db() -> None:
                     f"Database schema is v{version}, the engine needs v{SCHEMA_VERSION}. "
                     f"Delete {DATABASE_URL.removeprefix('sqlite:///')} to start fresh."
                 )
+            tables = set(inspect(conn).get_table_names())
             for v in range(version, SCHEMA_VERSION):
                 for statement in UPGRADES[v]:
+                    # A table added in a later version doesn't exist yet: create_all builds it complete.
+                    if statement.startswith("ALTER TABLE ") and statement.split()[2] not in tables:
+                        continue
                     conn.exec_driver_sql(statement)
         Base.metadata.create_all(conn)
         conn.exec_driver_sql(f"PRAGMA user_version = {SCHEMA_VERSION}")

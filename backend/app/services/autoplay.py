@@ -19,6 +19,7 @@ from app.engine import attributes as A
 from app.engine import simulation
 from app.engine.training import ERA_ORDER, Era, era_for
 from app.models import Beatmap, BeatmapSet, Player
+from app.services import beatmap_index
 from app.services.sessions import ATTEMPT_OVERHEAD_S, PlayRequest
 
 # Mirror star ratings use today's algorithm and run ~5% above stable's.
@@ -87,6 +88,7 @@ def handled_stars(player: Player, preset: Preset) -> float:
 def _candidates(db: Session, player: Player, preset: Preset, target_nm: float, window: float):
     q = (select(Beatmap, BeatmapSet).join(BeatmapSet)
          .where(BeatmapSet.ranked_date <= player.in_game_date,
+                BeatmapSet.status.in_(beatmap_index.PP_STATUS_NAMES),
                 Beatmap.stars.between(target_nm - window, target_nm + window),
                 Beatmap.hit_length.between(45, preset.max_length)))
     if preset.min_bpm:

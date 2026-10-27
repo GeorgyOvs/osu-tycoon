@@ -7,7 +7,7 @@ import { DRILL_LABELS, PRESET_LABELS } from './i18n.keys'
 import { RU_INTEGRITY, RU_INTEGRITY_PATTERNS } from './i18n.ru.integrity'
 import { RU_MENTORS, RU_MENTORS_PATTERNS } from './i18n.ru.mentors'
 import { RU_LEGACY, RU_LEGACY_PATTERNS } from './i18n.ru.legacy'
-import { RU_REAL } from './i18n.ru.real'
+import { RU_REAL, RU_REAL_PATTERNS } from './i18n.ru.real'
 import { RU_REPLAY, RU_REPLAY_PATTERNS } from './i18n.ru.replay'
 import { RU_STORY, RU_STORY_PATTERNS } from './i18n.ru.story'
 import { RU_SEARCH, RU_SEARCH_PATTERNS } from './i18n.ru.search'
@@ -592,6 +592,19 @@ export const RU: Record<string, string> = {
   // --- careers -----------------------------------------------------------------------------
   'Delete this career? This cannot be undone.': 'Удалить эту карьеру? Отменить будет нельзя.',
   'Continue career': 'Продолжить карьеру',
+  'Export this career to a file': 'Экспортировать эту карьеру в файл',
+  'Move careers between devices': 'Перенос карьер между устройствами',
+  'Export all careers': 'Экспортировать все карьеры',
+  'Import from a file': 'Импортировать из файла',
+  'Importing…': 'Импорт…',
+  'no careers': 'нет карьер',
+  'Import {incoming}? It replaces all careers on this device ({current}); a backup of them is kept.':
+    'Импортировать {incoming}? Это заменит все карьеры на этом устройстве ({current}); их резервная копия сохранится.',
+  'Import {incoming}?': 'Импортировать {incoming}?',
+  'Imported: {names}. The previous data was saved as data/backups/{backup}.':
+    'Импортировано: {names}. Прежние данные сохранены в data/backups/{backup}.',
+  'An export holds the careers with everything in them. Importing replaces the careers on this device; the client keeps its own maps and local scores in %APPDATA%\\osu-tycoon.':
+    'В экспорте карьеры со всеми данными. Импорт заменяет карьеры на этом устройстве; карты и локальные скоры клиента лежат отдельно, в %APPDATA%\\osu-tycoon.',
   Delete: 'Удалить',
   'New career': 'Новая карьера',
   Username: 'Ник',
@@ -688,6 +701,7 @@ export const RU_PATTERNS: [RegExp, Out][] = [
   ...RU_MENTORS_PATTERNS,
   ...RU_TEAM_PATTERNS,
   ...RU_REPLAY_PATTERNS,
+  ...RU_REAL_PATTERNS,
   // simulation & life events
   [/^(.+) reached (\d+)\.$/, (g, v) => `${L(g)}: достигнут уровень ${v}.`],
   [/^Something clicked: (.+) \+([\d.]+)\.$/, (s, j) => `Что-то щёлкнуло: ${L(s)} +${j}.`],
